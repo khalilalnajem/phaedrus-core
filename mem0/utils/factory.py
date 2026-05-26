@@ -53,6 +53,8 @@ class LlmFactory:
         "lmstudio": ("mem0.llms.lmstudio.LMStudioLLM", LMStudioConfig),
         "vllm": ("mem0.llms.vllm.VllmLLM", VllmConfig),
         "langchain": ("mem0.llms.langchain.LangchainLLM", BaseLlmConfig),
+        # Phaedrus addition: shells out to Codex CLI (OAuth via user's subscription, no API burn).
+        "codex_cli": ("mem0.llms.codex_cli.CodexCLILLM", BaseLlmConfig),
     }
 
     @classmethod
