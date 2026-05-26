@@ -1,12 +1,18 @@
 """
 Batch-ingest a slice of Claude Code sessions into Phaedrus.
 
-Uses codex_cli (no API burn). Persists to ~/.phaedrus/. Resumes from
-~/.phaedrus/ingested_sessions.txt so re-running skips already-done sessions.
+Runs BOTH layers per session:
+- Layer A (mem0 atomic facts) → ~/.phaedrus/qdrant (semantic search)
+- Layer B (conversation card)  → ~/.phaedrus/cards/<session>.json (daily triage)
+
+Uses codex_cli (no API burn). Resumes from ~/.phaedrus/ingested_sessions.txt
+so re-running skips already-done sessions.
 
 Usage:
-    python scripts/phaedrus/ingest_claude_code_batch.py 10           # ingest 10 new sessions
-    python scripts/phaedrus/ingest_claude_code_batch.py 50 --max-msg 30  # 50 sessions, cap at 30 msgs each
+    python scripts/phaedrus/ingest_claude_code_batch.py 10
+    python scripts/phaedrus/ingest_claude_code_batch.py 50 --max-msg 30
+    python scripts/phaedrus/ingest_claude_code_batch.py 10 --layer a   # only atomic facts
+    python scripts/phaedrus/ingest_claude_code_batch.py 10 --layer b   # only cards
 """
 import argparse
 import json
@@ -15,9 +21,19 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from phaedrus_config import build_config, PHAEDRUS_HOME
+from extract_card import (
+    format_for_prompt, EXTRACTION_PROMPT,
+    parse_card, merge_regex_links,
+)
+from mem0.llms.codex_cli import CodexCLILLM
+from mem0.configs.llms.base import BaseLlmConfig
 
 from mem0 import Memory
+
+CARDS_DIR = PHAEDRUS_HOME / "cards"
+CARDS_DIR.mkdir(exist_ok=True)
 
 CLAUDE_CODE_SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem"
 INGESTED_LOG = PHAEDRUS_HOME / "ingested_sessions.txt"
@@ -100,13 +116,46 @@ def pick_sessions(limit: int, already: set) -> list:
     return [p for _, p in middle[:limit]]
 
 
+def run_layer_a(m: Memory, messages: list, metadata: dict, max_msg: int):
+    """Atomic-fact extraction (mem0). Returns (n_facts, elapsed_seconds)."""
+    sample = messages[: max_msg]
+    t0 = time.time()
+    result = m.add(sample, user_id="khalil", metadata=metadata)
+    return len(result.get("results", [])), time.time() - t0
+
+
+def run_layer_b(llm: CodexCLILLM, messages: list, session_id: str, max_msg: int):
+    """Structured-card extraction. Returns (card_dict, elapsed_seconds)."""
+    formatted = format_for_prompt(messages, max_messages=max_msg)
+    prompt = EXTRACTION_PROMPT + formatted
+    t0 = time.time()
+    raw = llm.generate_response(
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    elapsed = time.time() - t0
+    card = parse_card(raw)
+    card = merge_regex_links(card, "\n".join(m["content"] for m in messages))
+    card["_meta"] = {
+        "session_id": session_id,
+        "message_count": len(messages),
+        "extraction_seconds": round(elapsed, 1),
+        "extracted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    out_path = CARDS_DIR / f"{session_id}.json"
+    out_path.write_text(json.dumps(card, indent=2, ensure_ascii=False))
+    return card, elapsed
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("count", type=int, help="how many new sessions to ingest")
     parser.add_argument("--max-msg", type=int, default=20, help="cap on messages per session (cost control)")
+    parser.add_argument("--layer", choices=["a", "b", "both"], default="both", help="which layer(s) to run")
     args = parser.parse_args()
 
     print(f">>> Phaedrus storage: {PHAEDRUS_HOME}")
+    print(f">>> Layer: {args.layer}")
     already = load_already_ingested()
     print(f">>> Already ingested: {len(already)} sessions")
 
@@ -116,8 +165,9 @@ def main():
         print("nothing to do.")
         return
 
-    m = Memory.from_config(build_config())
-    print(">>> Memory ready.")
+    m = Memory.from_config(build_config()) if args.layer in ("a", "both") else None
+    llm = CodexCLILLM(BaseLlmConfig()) if args.layer in ("b", "both") else None
+    print(">>> Ready.")
     print()
 
     success = 0
@@ -131,12 +181,19 @@ def main():
                 mark_ingested(session_id)
                 continue
 
-            sample = messages[: args.max_msg]
-            t0 = time.time()
-            result = m.add(sample, user_id="khalil", metadata=metadata)
-            elapsed = time.time() - t0
-            added = len(result.get("results", []))
-            print(f"  ✓ {added} facts in {elapsed:.1f}s ({metadata['message_count']} msgs in source)")
+            if args.layer in ("a", "both"):
+                n_facts, t = run_layer_a(m, messages, metadata, args.max_msg)
+                print(f"  Layer A: ✓ {n_facts} atomic facts in {t:.0f}s")
+
+            if args.layer in ("b", "both"):
+                card, t = run_layer_b(llm, messages, session_id, max_msg=40)
+                proj = card.get("project_match", {}).get("id", "?")
+                conf = card.get("project_match", {}).get("confidence", 0)
+                opens = len(card.get("open_items", []))
+                sparks = len(card.get("sparks", []))
+                links = len(card.get("links", []))
+                print(f"  Layer B: ✓ card in {t:.0f}s | proj={proj} ({conf}) opens={opens} sparks={sparks} links={links}")
+
             mark_ingested(session_id)
             success += 1
         except KeyboardInterrupt:
@@ -150,6 +207,8 @@ def main():
     print(f">>> Done. {success}/{len(targets)} sessions ingested cleanly.")
     print(f">>> Errors logged to: {ERROR_LOG}")
     print(f">>> Ingested log:     {INGESTED_LOG}")
+    if args.layer in ("b", "both"):
+        print(f">>> Cards dir:        {CARDS_DIR}")
 
 
 if __name__ == "__main__":
