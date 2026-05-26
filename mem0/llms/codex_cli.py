@@ -75,17 +75,20 @@ class CodexCLILLM(LLMBase):
             out_path = out_file.name
 
         try:
+            # Pass prompt via stdin instead of argv — mem0's extraction prompts
+            # are multi-thousand chars and exceed shell ARG_MAX. `codex exec -`
+            # reads instructions from stdin.
             cmd = [
                 self.codex_binary,
                 "exec",
                 "--skip-git-repo-check",
                 "--output-last-message",
                 out_path,
-                prompt,
+                "-",
             ]
-            # codex routes via OAuth (no API key). Inherit the user's env.
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=300,

@@ -11,6 +11,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv("/Users/khalilalnajem/Documents/phaedrus-core/.env", override=True)
+sys.path.insert(0, str(Path(__file__).parent))
+from phaedrus_config import build_config
 from mem0 import Memory
 
 CLAUDE_CODE_SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem"
@@ -71,11 +73,7 @@ def pick_session(min_lines=200, max_lines=400):
 
 
 def main():
-    config = {
-        "llm": {"provider": "codex_cli", "config": {"max_tokens": 2048}},
-        "embedder": {"provider": "fastembed", "config": {"model": "BAAI/bge-small-en-v1.5", "embedding_dims": 384}},
-        "vector_store": {"provider": "qdrant", "config": {"collection_name": "phaedrus", "embedding_model_dims": 384, "on_disk": False}},
-    }
+    config = build_config()
     print(">>> Building Memory instance...")
     m = Memory.from_config(config)
 
