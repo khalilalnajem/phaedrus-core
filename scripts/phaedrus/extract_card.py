@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from mem0.llms.codex_cli import CodexCLILLM
-from mem0.configs.llms.base import BaseLlmConfig
+from phaedrus_config import _pick_llm_config, get_llm_mode
+from mem0.utils.factory import LlmFactory
 
 CLAUDE_CODE_SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem"
 
@@ -212,8 +212,10 @@ def main():
     formatted = format_for_prompt(messages, max_messages=40)
     prompt = EXTRACTION_PROMPT + formatted
 
-    print(f">>> Sending {len(prompt)} chars to Codex...")
-    llm = CodexCLILLM(BaseLlmConfig())
+    llm_conf = _pick_llm_config()
+    print(f">>> LLM mode: {llm_conf['provider']}")
+    print(f">>> Sending {len(prompt)} chars to LLM...")
+    llm = LlmFactory.create(llm_conf["provider"], llm_conf["config"])
     raw = llm.generate_response(
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},

@@ -22,13 +22,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from phaedrus_config import build_config, PHAEDRUS_HOME
+from phaedrus_config import build_config, PHAEDRUS_HOME, _pick_llm_config, get_llm_mode
 from extract_card import (
     format_for_prompt, EXTRACTION_PROMPT,
     parse_card, merge_regex_links,
 )
-from mem0.llms.codex_cli import CodexCLILLM
-from mem0.configs.llms.base import BaseLlmConfig
+from mem0.utils.factory import LlmFactory
 
 from mem0 import Memory
 
@@ -124,7 +123,7 @@ def run_layer_a(m: Memory, messages: list, metadata: dict, max_msg: int):
     return len(result.get("results", [])), time.time() - t0
 
 
-def run_layer_b(llm: CodexCLILLM, messages: list, session_id: str, max_msg: int):
+def run_layer_b(llm, messages: list, session_id: str, max_msg: int):
     """Structured-card extraction. Returns (card_dict, elapsed_seconds)."""
     formatted = format_for_prompt(messages, max_messages=max_msg)
     prompt = EXTRACTION_PROMPT + formatted
@@ -165,8 +164,10 @@ def main():
         print("nothing to do.")
         return
 
+    llm_conf = _pick_llm_config()
+    print(f">>> LLM mode: {llm_conf['provider']}")
     m = Memory.from_config(build_config()) if args.layer in ("a", "both") else None
-    llm = CodexCLILLM(BaseLlmConfig()) if args.layer in ("b", "both") else None
+    llm = LlmFactory.create(llm_conf["provider"], llm_conf["config"]) if args.layer in ("b", "both") else None
     print(">>> Ready.")
     print()
 

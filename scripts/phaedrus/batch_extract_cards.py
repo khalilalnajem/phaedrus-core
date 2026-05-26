@@ -19,13 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from phaedrus_config import PHAEDRUS_HOME
+from phaedrus_config import PHAEDRUS_HOME, _pick_llm_config, get_llm_mode
 from extract_card import (
     extract_messages, format_for_prompt, EXTRACTION_PROMPT,
     parse_card, merge_regex_links, CLAUDE_CODE_SESSIONS_DIR
 )
-from mem0.llms.codex_cli import CodexCLILLM
-from mem0.configs.llms.base import BaseLlmConfig
+from mem0.utils.factory import LlmFactory
 
 CARDS_DIR = PHAEDRUS_HOME / "cards"
 CARDS_DIR.mkdir(exist_ok=True)
@@ -76,7 +75,9 @@ def main():
         print("nothing to do.")
         return
 
-    llm = CodexCLILLM(BaseLlmConfig())
+    llm_conf = _pick_llm_config()
+    print(f">>> LLM mode: {llm_conf['provider']}")
+    llm = LlmFactory.create(llm_conf["provider"], llm_conf["config"])
 
     summary = []
     for i, path in enumerate(targets, 1):
