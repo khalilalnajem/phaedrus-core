@@ -71,12 +71,8 @@ def pick_session(min_lines=200, max_lines=400):
 
 
 def main():
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        print("ERROR: ANTHROPIC_API_KEY not loaded"); sys.exit(1)
-
     config = {
-        "llm": {"provider": "anthropic", "config": {"model": "claude-sonnet-4-5", "api_key": key, "max_tokens": 2048}},
+        "llm": {"provider": "codex_cli", "config": {"max_tokens": 2048}},
         "embedder": {"provider": "fastembed", "config": {"model": "BAAI/bge-small-en-v1.5", "embedding_dims": 384}},
         "vector_store": {"provider": "qdrant", "config": {"collection_name": "phaedrus", "embedding_model_dims": 384, "on_disk": False}},
     }
