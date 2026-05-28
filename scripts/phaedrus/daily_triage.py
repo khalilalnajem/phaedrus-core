@@ -160,6 +160,7 @@ def render_triage_line(item: dict, card: dict) -> str:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--top", type=int, default=7, help="how many cards to surface")
+    parser.add_argument("--max-per-project", type=int, default=2, help="cap items per project so triage mixes projects")
     parser.add_argument("--show-scores", action="store_true", help="print scores next to each item")
     args = parser.parse_args()
 
@@ -192,8 +193,19 @@ def main():
             scored.append((s, item, card))
     scored.sort(key=lambda x: -x[0])
 
-    top = scored[: args.top]
-    print(f">>> Surfacing top {len(top)} of {len(scored)} eligible items")
+    # Apply per-project cap so triage mixes projects, not just the loudest one
+    seen_per_project = {}
+    top = []
+    for s, item, card in scored:
+        proj = item.get("project") or card.get("project_match", {}).get("id", "none")
+        if seen_per_project.get(proj, 0) >= args.max_per_project:
+            continue
+        top.append((s, item, card))
+        seen_per_project[proj] = seen_per_project.get(proj, 0) + 1
+        if len(top) >= args.top:
+            break
+
+    print(f">>> Surfacing top {len(top)} of {len(scored)} eligible items (max {args.max_per_project} per project)")
     print()
     print("=" * 70)
     print(f"PHAEDRUS DAILY TRIAGE — {datetime.now().strftime('%Y-%m-%d')}")

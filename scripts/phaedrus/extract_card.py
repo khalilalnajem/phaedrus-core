@@ -69,6 +69,36 @@ Return ONE JSON object with this exact shape. No prose. No markdown fences. JSON
       "type": "github-repo | github-profile | tweet | x-profile | article | tool | reference | other",
       "project": "matched project id or 'none'"
     }
+  ],
+  "people": [
+    {
+      "name": "Person's name as written (preserve spelling)",
+      "role_or_context": "1 sentence: who they are or why they came up (advisor, collaborator, customer, friend, etc.)",
+      "project": "matched project id or 'none'"
+    }
+  ],
+  "references": [
+    {
+      "name": "Book / podcast / tool / product / paper name (NOT a URL)",
+      "type": "book | podcast | tool | product | paper | course | other",
+      "context": "1 sentence: how it came up in conversation",
+      "project": "matched project id or 'none'"
+    }
+  ],
+  "numbers": [
+    {
+      "value": "The number / amount / metric as stated",
+      "what": "What it measures (cost, percentage, deadline, headcount, etc.)",
+      "context": "1 sentence: what was happening when this number came up",
+      "project": "matched project id or 'none'"
+    }
+  ],
+  "files": [
+    {
+      "path": "File path as written (e.g. ~/Documents/sanad/sanad-mvp/docs/ROADMAP.md)",
+      "context": "1 sentence: what this file was for or being discussed about",
+      "project": "matched project id or 'none'"
+    }
   ]
 }
 
@@ -79,6 +109,30 @@ CRITICAL INSTRUCTIONS:
 - Use direct quotes from the conversation for sparks and open_items text where possible.
 - For project_match: match against the user's known projects above. If the conversation does not relate to any, return id='none' with low confidence.
 - For links: capture EVERY external URL mentioned anywhere in the conversation (https://..., http://..., github.com/..., x.com/..., twitter.com/...). Include the URL exactly as written, plus 1 sentence of surrounding context so Khalil can remember why it came up. Do NOT include file paths, localhost URLs, or internal tool URLs.
+
+COMMITMENT DEFINITION (very important — DO NOT over-classify):
+
+A COMMITMENT is something Khalil says HE will do, ON HIS OWN TIME, with intent to act later. Format pattern: "I will X" / "I'll do Y" / "I need to Z by Tuesday" / "I'm going to ship X this week".
+
+A commitment must satisfy ALL of these:
+- Khalil himself is the actor (NOT the assistant)
+- The action is scheduled for AFTER the conversation ends (NOT during it)
+- It carries real intent, not idle musing
+
+DO NOT classify as commitments:
+- Instructions to the AI assistant ("click here", "paste this", "open that tab", "run this command")
+- Steps Khalil performs WHILE the conversation is happening ("I just clicked it", "I'm pasting now", "screenshot taken")
+- Things the user explicitly said they already did during the chat itself
+- Recommendations the assistant made TO Khalil ("you should run X") unless Khalil explicitly accepted with intent
+- Hypothetical or exploratory statements ("we could try X" without "I'll")
+
+If something is more spark than commitment (an idea Khalil mentioned without committing to act), put it in sparks[] with type=idea, NOT in open_items[] with type=commitment.
+
+PEOPLE / REFERENCES / NUMBERS / FILES:
+- people: any human name mentioned (not Khalil himself, not the assistant). Include with role/context.
+- references: books, podcasts, tools, products, papers, courses mentioned BY NAME without URLs (URLs go in links[]).
+- numbers: costs, percentages, headcount, deadlines, prices, metrics — any quantified fact worth anchoring.
+- files: file paths referenced in conversation (e.g. ~/Documents/sanad/...). NOT URLs.
 
 CONVERSATION:
 
@@ -155,20 +209,26 @@ def merge_regex_links(card: dict, conversation_text: str) -> dict:
 
 
 def parse_card(raw_response: str) -> dict:
-    """Strip fences if present, parse JSON."""
+    """Strip fences if present, parse JSON, repair if malformed."""
     text = raw_response.strip()
-    # Strip ```json ... ``` fences if Codex added them despite instruction
+    # Strip ```json ... ``` fences if model added them despite instruction
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
-    # Find the first { and matching }
     first = text.find("{")
     if first == -1:
         raise ValueError("No JSON object found in response")
-    # Naive: assume everything from first { to last } is the JSON
     last = text.rfind("}")
     if last == -1:
         raise ValueError("No closing brace found")
-    return json.loads(text[first:last + 1])
+    candidate = text[first:last + 1]
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        # Fall back to json-repair for common LLM JSON issues:
+        # trailing commas, unescaped quotes inside strings, missing commas, etc.
+        from json_repair import repair_json
+        repaired = repair_json(candidate)
+        return json.loads(repaired)
 
 
 def pick_substantive_session():
