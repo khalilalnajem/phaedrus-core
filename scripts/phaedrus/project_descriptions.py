@@ -72,14 +72,25 @@ def ensure_default_descriptions() -> Path:
 
 
 def load_descriptions() -> dict:
-    """Parse the markdown file into {slug: description}."""
+    """Parse descriptions. Prefer unified projects.yml; fall back to legacy markdown."""
+    # Try unified config first (single source of truth)
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent))
+        from projects_config import get_descriptions
+        unified = get_descriptions()
+        if unified:
+            return unified
+    except Exception:
+        pass
+
+    # Fall back to legacy markdown
     ensure_default_descriptions()
     out = {}
     for line in DESCRIPTIONS_PATH.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("//"):
             continue
-        # Accept both em-dash and double-hyphen as separators
         m = re.match(r"^([a-zA-Z0-9._\-/]+)\s*(?:—|--|-)\s*(.+)$", line)
         if m:
             slug, desc = m.group(1).strip().lower(), m.group(2).strip()

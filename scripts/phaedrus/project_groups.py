@@ -34,7 +34,25 @@ def load_registry() -> dict:
 
 
 def load_user_overrides() -> dict:
-    """Read user-defined groupings from ~/.phaedrus/project_groups.json."""
+    """Read user-defined groupings. Prefer unified projects.yml; fall back to legacy JSON."""
+    # Try unified config first (single source of truth)
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent))
+        from projects_config import (
+            get_parent_children_map, get_excluded, get_rejected_suggestions
+        )
+        ptc = get_parent_children_map()
+        if ptc:
+            return {
+                "child_to_parent": ptc,
+                "exclude_from_parent": list(get_excluded()),
+                "rejected_suggestions": get_rejected_suggestions(),
+            }
+    except Exception:
+        pass
+
+    # Fall back to legacy JSON
     if not GROUPS_PATH.exists():
         return {}
     try:
