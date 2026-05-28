@@ -25,6 +25,7 @@ from phaedrus_config import _pick_llm_config, get_llm_mode
 from preferences import format_preferences_for_prompt
 from corrections import format_corrections_for_prompt, apply_rules
 from project_registry import get_active_projects
+from project_groups import get_active_parent_projects
 from mem0.utils.factory import LlmFactory
 
 CLAUDE_CODE_SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem"
@@ -280,8 +281,8 @@ def main():
     corrections_block = format_corrections_for_prompt(n=20)
     prompt = prefs_block + corrections_block + prompt
 
-    # Use live project registry if available, else fall back to hardcoded KNOWN_PROJECTS
-    active = get_active_projects()
+    # Use grouped parent projects (preferred) → flat registry → hardcoded fallback
+    active = get_active_parent_projects() or get_active_projects()
     if active:
         prompt = prompt.replace(
             "one of: " + ", ".join(KNOWN_PROJECTS),

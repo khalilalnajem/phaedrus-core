@@ -26,12 +26,24 @@ CARDS_DIR = PHAEDRUS_HOME / "cards"
 DOCUMENTS = Path.home() / "Documents"
 MEMORY_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem" / "memory"
 
-# Folders we never treat as projects (system folders, large content libraries)
+# Folders we never treat as projects (system folders, large content libraries, screenshots)
 EXCLUDE = {
     ".DS_Store", "Library", "Downloads", "Desktop", "Pictures", "Music",
     "Movies", "Public", "Applications", "node_modules", ".Trash",
     "Obsidian Vault", "Obsidian-Vault",  # personal note vaults, not projects
+    "screenshots", "Screenshots", "Screen Recordings",  # capture artefacts
+    "Documents", "Untitled",  # generic
 }
+
+
+def normalize_slug(name: str) -> str:
+    """Make slugs case-insensitive and underscore/hyphen consistent."""
+    s = name.lower().strip()
+    s = s.replace("_", "-").replace(" ", "-")
+    # collapse repeated dashes
+    while "--" in s:
+        s = s.replace("--", "-")
+    return s
 
 
 def status_from_age(days_since_touch: float) -> str:
@@ -60,13 +72,21 @@ def scan_local_folders() -> dict:
         except OSError:
             continue
         days = (now - mtime) / 86400
-        found[entry.name.lower()] = {
-            "id": entry.name.lower().replace(" ", "-"),
-            "display_name": entry.name,
-            "path": str(entry),
-            "last_touched_days_ago": round(days, 1),
-            "signal_local_folder": True,
-        }
+        slug = normalize_slug(entry.name)
+        # Merge with existing if same normalized slug already seen
+        if slug in found:
+            # Take the more recent mtime
+            if days < found[slug]["last_touched_days_ago"]:
+                found[slug]["last_touched_days_ago"] = round(days, 1)
+                found[slug]["path"] = str(entry)
+        else:
+            found[slug] = {
+                "id": slug,
+                "display_name": entry.name,
+                "path": str(entry),
+                "last_touched_days_ago": round(days, 1),
+                "signal_local_folder": True,
+            }
     return found
 
 
@@ -76,8 +96,7 @@ def scan_memory_files() -> dict:
     if not MEMORY_DIR.exists():
         return found
     for p in MEMORY_DIR.glob("project_*.md"):
-        # extract slug from filename like project_sanad_mvp.md -> sanad-mvp
-        slug = p.stem.replace("project_", "").replace("_", "-")
+        slug = normalize_slug(p.stem.replace("project_", ""))
         try:
             mtime = p.stat().st_mtime
         except OSError:
@@ -91,6 +110,10 @@ def scan_memory_files() -> dict:
                 "memory_last_touched_days_ago": round(days, 1),
                 "signal_memory_file": True,
             }
+        else:
+            found[slug]["memory_file"] = str(p)
+            found[slug]["memory_last_touched_days_ago"] = round(days, 1)
+            found[slug]["signal_memory_file"] = True
     return found
 
 
