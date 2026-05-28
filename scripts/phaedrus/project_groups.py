@@ -138,6 +138,84 @@ def build_grouped_view(registry: dict, overrides: dict, auto_map: dict) -> dict:
     return dict(tree)
 
 
+def suggest_semantic_groupings(slugs: list, already_grouped: dict) -> list:
+    """
+    Use an LLM call to suggest semantic groupings the string rules can't see.
+    Returns a list of {parent, children, reason} suggestions for user review.
+
+    Example: nothing-application + job-applications (Nothing is a company being applied to).
+    """
+    if not slugs:
+        return []
+
+    # Filter out slugs already grouped to keep the prompt tight
+    candidates = [s for s in slugs if s not in already_grouped]
+    if len(candidates) < 2:
+        return []
+
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from phaedrus_config import _pick_llm_config
+    from mem0.utils.factory import LlmFactory
+
+    prompt = """You are looking at a list of folder/project names from a user's machine.
+Some of them are semantically related and should be grouped under a common parent project,
+EVEN IF their names don't share a prefix or substring.
+
+Example: "nothing-application" and "job-applications" might both belong under "job-applications"
+because Nothing is a company the user is applying to.
+
+Project list:
+""" + "\n".join(f"- {s}" for s in candidates) + """
+
+Return JSON ONLY. No prose, no markdown fences. Schema:
+{
+  "groupings": [
+    {
+      "parent": "one of the slugs above (the meta-project)",
+      "children": ["one or more slugs from the list above"],
+      "reason": "one sentence explaining why these belong together semantically"
+    }
+  ]
+}
+
+Rules:
+- Only suggest groupings where the relationship is genuinely meaningful, not just superficial.
+- The parent MUST be one of the slugs in the list.
+- Children must NOT include the parent.
+- If you see no real semantic groupings beyond what string matching would catch, return {"groupings": []}.
+"""
+    llm_conf = _pick_llm_config()
+    try:
+        llm = LlmFactory.create(llm_conf["provider"], llm_conf["config"])
+        raw = llm.generate_response(
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        print(f"  ⚠ LLM suggestion failed: {e}")
+        return []
+
+    # Parse defensively
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last == -1:
+        return []
+    try:
+        data = json.loads(text[first:last + 1])
+    except Exception:
+        try:
+            from json_repair import repair_json
+            data = json.loads(repair_json(text[first:last + 1]))
+        except Exception:
+            return []
+    return data.get("groupings", [])
+
+
 def write_default_overrides_template():
     """Create a starter project_groups.json the user can edit."""
     if GROUPS_PATH.exists():
@@ -162,9 +240,29 @@ def main():
     all_slugs = list(registry.get("projects", {}).keys())
 
     auto_map = auto_detect_parents(all_slugs)
-    print(f">>> Auto-detected {len(auto_map)} child→parent relationships:")
+    print(f">>> Auto-detected {len(auto_map)} child→parent relationships (string-based):")
     for child, parent in sorted(auto_map.items()):
         print(f"  {child:30s} → {parent}")
+
+    # AI-suggested groupings for semantic relationships strings can't see
+    print("\n>>> Asking LLM for semantic grouping suggestions (one call, ~10s)...")
+    suggestions = suggest_semantic_groupings(all_slugs, auto_map)
+    if suggestions:
+        suggestions_path = PHAEDRUS_HOME / "suggested_groups.json"
+        suggestions_path.write_text(json.dumps({"suggestions": suggestions}, indent=2, ensure_ascii=False))
+        print(f">>> LLM suggested {len(suggestions)} semantic groupings (written to {suggestions_path}):")
+        for s in suggestions:
+            kids = ", ".join(s.get("children", []))
+            print(f"  {s.get('parent', '?'):20s} ← {kids}")
+            print(f"    reason: {s.get('reason', '')[:120]}")
+        # Auto-apply suggestions to auto_map for this run (user can override later)
+        for s in suggestions:
+            parent = s.get("parent")
+            for child in s.get("children", []):
+                if parent and child and child != parent:
+                    auto_map[child] = parent
+    else:
+        print(">>> No additional semantic groupings suggested.")
 
     tree = build_grouped_view(registry, overrides, auto_map)
     print(f"\n>>> Top-level projects after grouping: {len(tree)}")
