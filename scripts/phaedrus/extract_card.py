@@ -45,8 +45,11 @@ Return ONE JSON object with this exact shape. No prose. No markdown fences. JSON
 
 {
   "topic": "6-10 words. What is this conversation about?",
-  "context": "2-3 sentences. What was being weighed, what trade-offs, what background was needed to make sense of the discussion?",
+  "context": "3-4 sentences (longer than you might think). What was being weighed, what trade-offs, what background was needed to make sense of the discussion?",
   "conclusion": "2-3 sentences. What got decided, what got committed, what was left open?",
+  "memory_anchors": [
+    "2-4 SPECIFIC vivid details that make this conversation instantly recognisable later. NOT a summary — specific quotable details. Examples: a person's name + their role ('Shaymaa said deadline is Tuesday'), a specific number ('$30K stipend cut'), a vivid phrase the user used ('I just realised vLLM might be cheaper'), or a unique moment ('the conversation pivoted when we found the Pactify pricing page'). Each anchor is 5-15 words, concrete and quoteable. These are what jog the user's memory."
+  ],
   "project_match": {
     "id": "one of: """ + ", ".join(KNOWN_PROJECTS) + """ or 'none' or 'new'",
     "confidence": "0.0 to 1.0"
@@ -56,7 +59,8 @@ Return ONE JSON object with this exact shape. No prose. No markdown fences. JSON
       "text": "Specific actionable. Direct quote or near-quote.",
       "type": "commitment | worry | idea | question",
       "project": "matched project id or 'none'",
-      "due": "ISO date if explicit, else null"
+      "due": "ISO date if explicit, else null",
+      "where_to_use": "1 sentence: WHEN and WHERE this should be surfaced for action. Examples: 'Before next MOHE check-in this week — Shaymaa is waiting on this', 'When planning sanad-mvp infrastructure for v2', 'First thing tomorrow morning while still fresh'. Concrete, contextual, actionable."
     }
   ],
   "sparks": [
@@ -64,7 +68,8 @@ Return ONE JSON object with this exact shape. No prose. No markdown fences. JSON
       "text": "Quote the line. Capture EVERY actionable thought, every 'btw', every 'what if', every tangent. Scan all messages, not just start and end.",
       "trigger_context": "1 sentence: what surrounded this in the conversation",
       "project": "matched project id or 'none'",
-      "type": "idea | observation | tangent | side-question"
+      "type": "idea | observation | tangent | side-question",
+      "where_to_use": "1 sentence: WHEN and WHERE this spark would be useful to revisit. Examples: 'When evaluating self-hosting options for sanad-mvp', 'Next time someone asks about the Plato Phaedrus reference', 'If pricing-pages decision comes back up in v2 planning'. Specific situation/moment."
     }
   ],
   "links": [
@@ -112,6 +117,20 @@ CRITICAL INSTRUCTIONS:
 - Capture sparks even if the user did NOT follow up on them. They are valuable precisely because they were not pursued.
 - If the conversation has any substance, MINIMUM 3 sparks. Empty sparks[] ONLY if the conversation is truly trivial (greeting, one-word reply, etc.).
 - Use direct quotes from the conversation for sparks and open_items text where possible.
+
+MEMORY ANCHORS (very important):
+- 2-4 specific vivid details that will make the user INSTANTLY remember this conversation 3 months from now.
+- NOT a summary. Specific quoteable details. Names + roles. Specific numbers. Vivid phrases. Unique moments.
+- Bad anchor: 'discussed Sanad migration' (too vague)
+- Good anchor: 'Khalil mentioned the $30 cost cap and Shaymaa's Tuesday deadline'
+- Good anchor: 'Pivoted when we found the Pactify pricing page'
+
+WHERE_TO_USE per item (very important):
+- Don't just say WHAT to do, say WHEN/WHERE it should resurface.
+- Bad: 'follow up on this' (no context)
+- Good: 'Before next MOHE check-in this week — Shaymaa is waiting on this'
+- Good: 'When planning sanad-mvp infrastructure for v2'
+- Good: 'Next time the topic of Pactify pricing comes back up'
 - For project_match: match against the user's known projects above. If the conversation does not relate to any, return id='none' with low confidence.
 - For links: capture EVERY external URL mentioned anywhere in the conversation (https://..., http://..., github.com/..., x.com/..., twitter.com/...). Include the URL exactly as written, plus 1 sentence of surrounding context so Khalil can remember why it came up. Do NOT include file paths, localhost URLs, or internal tool URLs.
 
