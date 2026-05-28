@@ -138,15 +138,18 @@ def build_grouped_view(registry: dict, overrides: dict, auto_map: dict) -> dict:
     return dict(tree)
 
 
-def suggest_semantic_groupings(slugs: list, already_grouped: dict) -> list:
+def suggest_semantic_groupings(slugs: list, already_grouped: dict, rejected: list = None) -> list:
     """
     Use an LLM call to suggest semantic groupings the string rules can't see.
     Returns a list of {parent, children, reason} suggestions for user review.
 
     Example: nothing-application + job-applications (Nothing is a company being applied to).
+
+    rejected: previously rejected groupings the user has corrected — fed to LLM as anti-examples.
     """
     if not slugs:
         return []
+    rejected = rejected or []
 
     # Filter out slugs already grouped to keep the prompt tight
     candidates = [s for s in slugs if s not in already_grouped]
@@ -159,6 +162,14 @@ def suggest_semantic_groupings(slugs: list, already_grouped: dict) -> list:
     from phaedrus_config import _pick_llm_config
     from mem0.utils.factory import LlmFactory
 
+    rejected_block = ""
+    if rejected:
+        rejected_block = "\n\nDO NOT SUGGEST these groupings — the user has rejected them before:\n"
+        for r in rejected:
+            kids = ", ".join(r.get("children", []))
+            reason = r.get("reason", "")
+            rejected_block += f"- {r.get('parent', '?')} ← {kids}. Reason rejected: {reason}\n"
+
     prompt = """You are looking at a list of folder/project names from a user's machine.
 Some of them are semantically related and should be grouped under a common parent project,
 EVEN IF their names don't share a prefix or substring.
@@ -167,7 +178,7 @@ Example: "nothing-application" and "job-applications" might both belong under "j
 because Nothing is a company the user is applying to.
 
 Project list:
-""" + "\n".join(f"- {s}" for s in candidates) + """
+""" + "\n".join(f"- {s}" for s in candidates) + rejected_block + """
 
 Return JSON ONLY. No prose, no markdown fences. Schema:
 {
@@ -244,9 +255,11 @@ def main():
     for child, parent in sorted(auto_map.items()):
         print(f"  {child:30s} → {parent}")
 
-    # AI-suggested groupings for semantic relationships strings can't see
-    print("\n>>> Asking LLM for semantic grouping suggestions (one call, ~10s)...")
-    suggestions = suggest_semantic_groupings(all_slugs, auto_map)
+    # AI-suggested groupings for semantic relationships strings can't see.
+    # Pass previously rejected suggestions so the LLM doesn't repeat its mistakes.
+    rejected = overrides.get("rejected_suggestions", [])
+    print(f"\n>>> Asking LLM for semantic grouping suggestions (one call, ~10s, {len(rejected)} prior rejections fed back)...")
+    suggestions = suggest_semantic_groupings(all_slugs, auto_map, rejected=rejected)
     if suggestions:
         suggestions_path = PHAEDRUS_HOME / "suggested_groups.json"
         suggestions_path.write_text(json.dumps({"suggestions": suggestions}, indent=2, ensure_ascii=False))
