@@ -138,6 +138,33 @@ def build_grouped_view(registry: dict, overrides: dict, auto_map: dict) -> dict:
     return dict(tree)
 
 
+def collect_project_context(slugs: list, max_per_project: int = 1) -> dict:
+    """
+    For each slug, gather context snippets from previously-extracted cards where
+    project_match.id == slug. Returns {slug: "topic — context — conclusion"} string.
+
+    This is what the LLM should read BEFORE suggesting groupings, so it actually
+    knows what each project IS (not just what it's called).
+    """
+    cards_dir = PHAEDRUS_HOME / "cards"
+    if not cards_dir.exists():
+        return {}
+    by_slug = {s: [] for s in slugs}
+    for p in cards_dir.glob("*.json"):
+        try:
+            card = json.loads(p.read_text())
+        except Exception:
+            continue
+        proj_id = card.get("project_match", {}).get("id", "")
+        if proj_id in by_slug and len(by_slug[proj_id]) < max_per_project:
+            topic = (card.get("topic") or "").strip()[:120]
+            context = (card.get("context") or "").strip()[:200]
+            conclusion = (card.get("conclusion") or "").strip()[:200]
+            snippet = f"topic: {topic} | context: {context} | conclusion: {conclusion}"
+            by_slug[proj_id].append(snippet)
+    return {slug: " || ".join(snips) for slug, snips in by_slug.items() if snips}
+
+
 def suggest_semantic_groupings(slugs: list, already_grouped: dict, rejected: list = None) -> list:
     """
     Use an LLM call to suggest semantic groupings the string rules can't see.
@@ -146,6 +173,10 @@ def suggest_semantic_groupings(slugs: list, already_grouped: dict, rejected: lis
     Example: nothing-application + job-applications (Nothing is a company being applied to).
 
     rejected: previously rejected groupings the user has corrected — fed to LLM as anti-examples.
+
+    Reads context snippets from existing cards so the LLM knows what each project IS, not
+    just what it's called. This prevents mistakes like grouping a portfolio site with a
+    similarly-named company project — universal fix, benefits every user.
     """
     if not slugs:
         return []
@@ -155,6 +186,15 @@ def suggest_semantic_groupings(slugs: list, already_grouped: dict, rejected: lis
     candidates = [s for s in slugs if s not in already_grouped]
     if len(candidates) < 2:
         return []
+
+    # NEW: gather context for each candidate from existing extracted cards
+    context_by_slug = collect_project_context(candidates, max_per_project=1)
+
+    # NEW: user-edited project descriptions (strongest signal for what each project IS)
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from project_descriptions import load_descriptions
+    descriptions = load_descriptions()
 
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
@@ -170,15 +210,33 @@ def suggest_semantic_groupings(slugs: list, already_grouped: dict, rejected: lis
             reason = r.get("reason", "")
             rejected_block += f"- {r.get('parent', '?')} ← {kids}. Reason rejected: {reason}\n"
 
+    # Project list with description (highest signal) + card context (secondary)
+    project_lines = []
+    for s in candidates:
+        desc = descriptions.get(s)
+        ctx = context_by_slug.get(s)
+        if desc:
+            project_lines.append(f"- {s} — DESCRIPTION: {desc}")
+        elif ctx:
+            project_lines.append(f"- {s}  [context from past chats: {ctx[:300]}]")
+        else:
+            project_lines.append(f"- {s}")
+
     prompt = """You are looking at a list of folder/project names from a user's machine.
 Some of them are semantically related and should be grouped under a common parent project,
 EVEN IF their names don't share a prefix or substring.
 
-Example: "nothing-application" and "job-applications" might both belong under "job-applications"
-because Nothing is a company the user is applying to.
+CRITICAL: When you see [context from past chats: ...] next to a project, READ IT FIRST.
+The context tells you what that project actually IS. Don't group projects together
+based on their names if their context shows they're conceptually different.
+Example mistake to avoid: grouping a personal portfolio website under a company project
+just because the names sound similar — the context will tell you they're separate.
+
+Example correct grouping: "nothing-application" and "job-applications" might both belong
+under "job-applications" because Nothing is a company the user is applying to.
 
 Project list:
-""" + "\n".join(f"- {s}" for s in candidates) + rejected_block + """
+""" + "\n".join(project_lines) + rejected_block + """
 
 Return JSON ONLY. No prose, no markdown fences. Schema:
 {

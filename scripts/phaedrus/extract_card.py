@@ -26,6 +26,7 @@ from preferences import format_preferences_for_prompt
 from corrections import format_corrections_for_prompt, apply_rules
 from project_registry import get_active_projects
 from project_groups import get_active_parent_projects
+from project_descriptions import format_descriptions_for_prompt
 from mem0.utils.factory import LlmFactory
 
 CLAUDE_CODE_SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem"
@@ -276,13 +277,16 @@ def main():
     formatted = format_for_prompt(messages, max_messages=40)
     prompt = EXTRACTION_PROMPT + formatted
 
-    # Inject user preferences + recent corrections at the top of the prompt
+    # Inject user preferences + recent corrections + project descriptions
     prefs_block = format_preferences_for_prompt()
     corrections_block = format_corrections_for_prompt(n=20)
-    prompt = prefs_block + corrections_block + prompt
 
     # Use grouped parent projects (preferred) → flat registry → hardcoded fallback
     active = get_active_parent_projects() or get_active_projects()
+    descriptions_block = format_descriptions_for_prompt(slugs=active) if active else ""
+
+    prompt = prefs_block + corrections_block + descriptions_block + prompt
+
     if active:
         prompt = prompt.replace(
             "one of: " + ", ".join(KNOWN_PROJECTS),
