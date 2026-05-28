@@ -447,6 +447,62 @@ def page_settings():
     return render_template_string(BASE, page_title="Settings", active="settings", content=content)
 
 
+# === Extension capture endpoint ===
+
+WEB_CAPTURES_DIR = PHAEDRUS_HOME / "web_captures"
+WEB_CAPTURES_DIR.mkdir(exist_ok=True)
+
+
+@app.route("/capture", methods=["POST", "GET", "OPTIONS"])
+def capture():
+    """Receive captures from the Phaedrus browser extension."""
+    if request.method == "OPTIONS":
+        # CORS preflight
+        resp = app.make_response("")
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return resp
+
+    if request.method == "GET":
+        # Health check + list recent captures
+        files = sorted(WEB_CAPTURES_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return jsonify({
+            "status": "phaedrus capture endpoint ready",
+            "captures_dir": str(WEB_CAPTURES_DIR),
+            "recent_captures": [p.name for p in files[:20]],
+            "count": len(files),
+        })
+
+    # POST: store the capture
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+    except Exception as e:
+        return jsonify({"error": f"invalid json: {e}"}), 400
+
+    source = payload.get("source") or request.headers.get("X-Phaedrus-Source") or "unknown"
+    safe_source = "".join(c for c in str(source) if c.isalnum() or c in "-._") or "unknown"
+    capture_id = payload.get("id") or f"{int(time.time()*1000)}"
+    safe_id = "".join(c for c in str(capture_id) if c.isalnum() or c in "-._")[:60]
+
+    record = {
+        "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": source,
+        "id": capture_id,
+        "url": payload.get("url"),
+        "title": payload.get("title"),
+        "messages": payload.get("messages") or [],
+        "raw": payload,
+    }
+
+    out_path = WEB_CAPTURES_DIR / f"{safe_source}_{safe_id}.json"
+    out_path.write_text(json.dumps(record, indent=2, ensure_ascii=False))
+
+    resp = jsonify({"ok": True, "saved_to": str(out_path), "source": source})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
 # === Boot ===
 
 def open_browser():
