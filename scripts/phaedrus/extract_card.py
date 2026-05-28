@@ -22,6 +22,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from phaedrus_config import _pick_llm_config, get_llm_mode
+from preferences import format_preferences_for_prompt
+from corrections import format_corrections_for_prompt, apply_rules
+from project_registry import get_active_projects
 from mem0.utils.factory import LlmFactory
 
 CLAUDE_CODE_SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-khalilalnajem"
@@ -272,14 +275,53 @@ def main():
     formatted = format_for_prompt(messages, max_messages=40)
     prompt = EXTRACTION_PROMPT + formatted
 
+    # Inject user preferences + recent corrections at the top of the prompt
+    prefs_block = format_preferences_for_prompt()
+    corrections_block = format_corrections_for_prompt(n=20)
+    prompt = prefs_block + corrections_block + prompt
+
+    # Use live project registry if available, else fall back to hardcoded KNOWN_PROJECTS
+    active = get_active_projects()
+    if active:
+        prompt = prompt.replace(
+            "one of: " + ", ".join(KNOWN_PROJECTS),
+            "one of: " + ", ".join(active),
+        )
+
     llm_conf = _pick_llm_config()
     print(f">>> LLM mode: {llm_conf['provider']}")
+    print(f">>> Preferences injected: {bool(prefs_block)}, corrections injected: {bool(corrections_block)}")
+    print(f">>> Active projects from registry: {len(active) if active else 0}")
     print(f">>> Sending {len(prompt)} chars to LLM...")
     llm = LlmFactory.create(llm_conf["provider"], llm_conf["config"])
     raw = llm.generate_response(
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
+
+    # Semantic self-heal: if the extraction came back too thin given a substantive
+    # source conversation, retry once with a stricter prompt before accepting it.
+    source_len = sum(len(m.get("content", "")) for m in messages)
+    if source_len > 800:
+        try:
+            preview_card = parse_card(raw)
+            preview_card = merge_regex_links(preview_card, "\n".join(m["content"] for m in messages))
+            opens = len(preview_card.get("open_items", []))
+            sparks = len(preview_card.get("sparks", []))
+            links = len(preview_card.get("links", []))
+            if opens + sparks + links < 2:
+                print(f">>> Self-heal: extraction looked thin ({opens} open, {sparks} sparks, {links} links). Retrying with stricter prompt...")
+                retry_prompt = (
+                    "The previous extraction returned very few items but the conversation was substantive. "
+                    "Re-read it carefully. There ARE actionable items, sparks, or links you missed. "
+                    "Be thorough. Output JSON only.\n\n"
+                ) + prompt
+                raw = llm.generate_response(
+                    messages=[{"role": "user", "content": retry_prompt}],
+                    response_format={"type": "json_object"},
+                )
+        except Exception:
+            pass  # parsing failed during preview, let the main parse handle it
 
     print(">>> Raw response (first 500 chars):")
     print(raw[:500])
@@ -291,6 +333,9 @@ def main():
     # Apply regex backstop for any URL the LLM missed
     raw_conversation = "\n".join(m["content"] for m in messages)
     card = merge_regex_links(card, raw_conversation)
+
+    # Apply deterministic rules (Approach C) — non-bypassable
+    card = apply_rules(card)
 
     print()
     print("=" * 60)
