@@ -721,41 +721,123 @@ def capture():
 @app.route("/import", methods=["GET"])
 def page_import():
     SH = "font-family:var(--serif);font-size:18px;font-weight:600;margin:0 0 6px"
-    steps = [
-        ("ChatGPT", "Settings → Data Controls → Export data. Emailed link; open the .zip."),
-        ("Claude", "Settings → Privacy → Export data. Emailed within hours; link lasts 24h."),
-        ("Gemini", "Google Takeout → deselect all → pick “My Activity” → Gemini Apps → JSON."),
-        ("Perplexity", "Settings → Account → Download My Data."),
-        ("DeepSeek", "Email service@deepseek.com for a data export (no self-serve)."),
+
+    # Per-platform: both paths, each with an HONEST time estimate AND a real
+    # step-by-step guide so nobody hits an unestimated wait or hunts for a button
+    # that doesn't exist. auto=None means no background pull. steps=[] for manual.
+    PLATFORMS = [
+        {
+            "name": "Claude", "key": "claude",
+            "auto": {"eta": "~10 min", "note": "Click the extension on claude.ai → “Pull my history”. Runs in the background."},
+            "manual": {"eta": "a few hours", "url": "https://claude.ai/settings/data-privacy-controls", "btn": "Open Claude settings",
+                       "steps": ["Settings → Privacy.", "Click “Export data”.", "Claude emails a link within a few hours (it expires in 24h — grab it same day).",
+                                 "Download the .zip (don’t unzip).", "Drop it in the box above."]},
+        },
+        {
+            "name": "ChatGPT", "key": "chatgpt",
+            "auto": {"eta": "~30–40 min", "note": "Click the extension on chatgpt.com → “Pull my history”. Slow for 1000+ chats (ChatGPT rate-limits); export is faster for big histories."},
+            "manual": {"eta": "minutes to a few hours", "url": "https://chatgpt.com/#settings/DataControls", "btn": "Open ChatGPT settings",
+                       "steps": ["Settings → Data controls.", "Click “Export” next to Export data, then Confirm.", "ChatGPT emails a link (usually minutes).",
+                                 "Download the .zip (don’t unzip).", "Drop it in the box above. Best path for big histories."]},
+        },
+        {
+            "name": "Gemini", "key": "gemini",
+            "auto": None,
+            "manual": {"eta": "minutes to a few hours", "url": "https://takeout.google.com/", "btn": "Open Google Takeout",
+                       "steps": ["Gemini has no export button — it’s in Google Takeout.",
+                                 "Click “Deselect all” first (or you’ll get your whole Google account).",
+                                 "Scroll down and tick ONLY “My Activity”.",
+                                 "Under My Activity, choose “Multiple formats” → set Activity to JSON.",
+                                 "Next step → Create export. Google emails a link.",
+                                 "In the download, the chats are under My Activity → Gemini Apps. Drop the file above.",
+                                 "Note: the category literally named “Gemini” is for saved Gems, not chats — you want My Activity → Gemini Apps."]},
+        },
+        {
+            "name": "Perplexity", "key": "perplexity",
+            "auto": None,
+            "manual": {"eta": "varies", "url": "", "btn": "",
+                       "steps": ["Heads up: Perplexity has NO self-serve export in its settings (we checked — Account and Preferences both lack it).",
+                                 "Easiest: just install the extension and let it capture Perplexity going forward — skip the history.",
+                                 "If you really want the back-catalogue: a third-party “Perplexity thread exporter” browser extension can scrape your library, then drop that file above.",
+                                 "Or email Perplexity support for a privacy/GDPR data request (slow)."]},
+        },
+        {
+            "name": "DeepSeek", "key": "deepseek",
+            "auto": None,
+            "manual": {"eta": "1–3 days", "url": "", "btn": "",
+                       "steps": ["DeepSeek has no self-serve export either.",
+                                 "Email service@deepseek.com and request a copy of your data (a GDPR/CCPA data request).",
+                                 "They reply with a file, usually within a few days.",
+                                 "Drop that file above when it arrives.",
+                                 "Or just install the extension and capture DeepSeek going forward."]},
+        },
     ]
-    steps_html = "".join(
-        f'<div class="card" style="padding:13px 16px"><div style="font-weight:600;font-size:14px">{name}</div>'
-        f'<div class="meta" style="margin-top:3px">{how}</div></div>'
-        for name, how in steps
-    )
+
+    rows = ""
+    for p in PLATFORMS:
+        # Automatic path cell
+        if p["auto"]:
+            auto_cell = (
+                f'<div style="flex:1;min-width:200px">'
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+                f'<span class="pill pill-idea"><span class="pdot"></span>Automatic</span>'
+                f'<span class="chip" style="background:var(--ok-soft);color:var(--ok)">{p["auto"]["eta"]}</span></div>'
+                f'<div class="meta">{p["auto"]["note"]}</div></div>'
+            )
+        else:
+            auto_cell = (
+                f'<div style="flex:1;min-width:200px">'
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+                f'<span class="pill pill-neutral"><span class="pdot"></span>Automatic</span>'
+                f'<span class="chip">not available</span></div>'
+                f'<div class="meta">No background pull — use the export steps.</div></div>'
+            )
+        # Manual path cell with expandable real steps
+        m = p["manual"]
+        steps_li = "".join(f'<li style="margin:5px 0;font-size:13px;color:var(--ink-2);line-height:1.5">{s}</li>' for s in m["steps"])
+        open_btn = (f'<a href="{m["url"]}" target="_blank" rel="noopener" class="btn btn-soft" '
+                    f'style="display:inline-block;margin-top:10px;text-decoration:none;font-size:12.5px">{m["btn"]} ↗</a>') if m.get("url") else ""
+        manual_cell = (
+            f'<div style="flex:1;min-width:200px">'
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+            f'<span class="pill pill-question"><span class="pdot"></span>Export file</span>'
+            f'<span class="chip" style="background:var(--info-soft);color:var(--info)">{m["eta"]}</span></div>'
+            f'<details style="margin-top:2px"><summary style="cursor:pointer;font-size:13px;color:var(--accent-ink)">Show steps</summary>'
+            f'<ol style="margin:8px 0 0;padding-left:18px">{steps_li}</ol>{open_btn}</details></div>'
+        )
+        rows += (
+            f'<div class="card" style="margin-bottom:12px">'
+            f'<div style="font-family:var(--serif);font-size:16.5px;font-weight:600;margin-bottom:11px">{p["name"]}</div>'
+            f'<div style="display:flex;gap:24px;flex-wrap:wrap">{auto_cell}{manual_cell}</div>'
+            f'</div>'
+        )
+
     content = f"""
     <div class="narrow">
       <h1 class="page-h">Import your history</h1>
-      <p class="page-sub">Drop an export file from any AI platform. Everything is parsed on your machine — nothing is uploaded anywhere.</p>
+      <p class="page-sub">Two ways in, per platform — pick by how long you'll wait. Everything is parsed on your machine; nothing is uploaded.</p>
 
-      <form id="imp" hx-post="/import" hx-encoding="multipart/form-data" hx-target="#imp-result" hx-swap="innerHTML"
-            style="margin-bottom:26px">
-        <label id="drop" for="file" style="display:block;border:1.5px dashed var(--line-2);border-radius:var(--radius);
-               padding:38px 24px;text-align:center;cursor:pointer;background:var(--surface);transition:border-color .15s">
-          <div style="font-family:var(--serif);font-size:17px;color:var(--ink);margin-bottom:5px">Choose an export file</div>
-          <div class="meta">.zip or .json — ChatGPT, Claude, Gemini, Perplexity, DeepSeek</div>
-          <input id="file" name="file" type="file" accept=".zip,.json" style="display:none"
-                 onchange="document.getElementById('fname').textContent=this.files[0]?this.files[0].name:''">
-          <div id="fname" class="chip" style="margin-top:12px;display:inline-block"></div>
-        </label>
-        <button class="btn btn-keep" style="margin-top:14px" type="submit">Import</button>
-        <span id="imp-spin" class="htmx-indicator meta" style="margin-left:10px">Parsing…</span>
-      </form>
+      <div class="card" style="background:var(--accent-soft);border:none;margin-bottom:26px">
+        <div style="font-weight:600;margin-bottom:3px">Drop an export file</div>
+        <div class="meta" style="margin-bottom:13px">Works for all five platforms. Got a .zip or .json from any of them? Drop it here.</div>
+        <form id="imp" hx-post="/import" hx-encoding="multipart/form-data" hx-target="#imp-result" hx-swap="innerHTML">
+          <label id="drop" for="file" style="display:block;border:1.5px dashed var(--line-2);border-radius:var(--radius-sm);
+                 padding:30px 24px;text-align:center;cursor:pointer;background:var(--surface);transition:border-color .15s">
+            <div style="font-family:var(--serif);font-size:16px;color:var(--ink);margin-bottom:4px">Choose a file</div>
+            <div class="meta">.zip or .json</div>
+            <input id="file" name="file" type="file" accept=".zip,.json" style="display:none"
+                   onchange="document.getElementById('fname').textContent=this.files[0]?this.files[0].name:''">
+            <div id="fname" class="chip" style="margin-top:11px;display:inline-block"></div>
+          </label>
+          <button class="btn btn-keep" style="margin-top:13px" type="submit">Import</button>
+          <span id="imp-spin" class="htmx-indicator meta" style="margin-left:10px">Parsing…</span>
+        </form>
+        <div id="imp-result" style="margin-top:14px"></div>
+      </div>
 
-      <div id="imp-result"></div>
-
-      <h2 style="{SH};margin-top:34px">Where to get each export</h2>
-      <div style="display:grid;gap:9px">{steps_html}</div>
+      <h2 style="{SH}">Per platform: which path, how long</h2>
+      <p class="meta" style="margin:0 0 14px">Automatic needs nothing from you but can be slow. Export files are faster for big histories and the only option where automatic isn't available.</p>
+      {rows}
     </div>
     <style>
       #imp.htmx-request #imp-spin {{ opacity:1 }}
