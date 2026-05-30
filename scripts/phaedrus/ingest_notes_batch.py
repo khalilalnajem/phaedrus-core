@@ -1,14 +1,20 @@
 """
-Generic batch ingester for note sources (Obsidian vault, Apple Notes).
+Generic batch ingester for note + web-chat sources (Obsidian vault, Apple
+Notes, browser-extension web captures).
 
 Usage:
     python scripts/phaedrus/ingest_notes_batch.py obsidian 5
     python scripts/phaedrus/ingest_notes_batch.py apple-notes 5
     python scripts/phaedrus/ingest_notes_batch.py obsidian 20 --max-msg 1 --layer b
+    python scripts/phaedrus/ingest_notes_batch.py web 50
 
 Notes are authored monologues, not back-and-forth conversations. The extractor
 treats each as a single user message and pulls the same structured card
 (topic, context, conclusion, memory_anchors, open_items, sparks, links, etc.)
+
+Web captures ARE real conversations: the full message list is passed to Layer B
+and each card's _meta.source is set to the capturing platform (claude / chatgpt
+/ gemini / grok / perplexity / deepseek) with url + title for provenance.
 """
 import argparse
 import json
@@ -77,6 +83,25 @@ def get_source(name: str):
             "session_id": sid,
             "label": "macOS Notes app via AppleScript",
         }
+    elif name == "web":
+        from source_web_captures import (
+            find_captures,
+            extract_messages,
+            session_id_from_path,
+            read_provenance,
+            WEB_CAPTURES_DIR,
+        )
+        return {
+            "name": "web",
+            "find": find_captures,
+            "extract": extract_messages,
+            "session_id": session_id_from_path,
+            # Web captures carry their own per-capture platform + url/title.
+            # The ingester uses this to set card _meta.source (claude/chatgpt/...)
+            # rather than the generic "web" source name.
+            "provenance": read_provenance,
+            "label": str(WEB_CAPTURES_DIR) if WEB_CAPTURES_DIR.exists() else "(no web_captures dir)",
+        }
     raise ValueError(f"unknown source: {name}")
 
 
@@ -99,8 +124,8 @@ def run_layer_a(m, messages, metadata, max_msg):
     return len(result.get("results", [])), time.time() - t0
 
 
-def run_layer_b(llm, messages, session_id, source_name):
-    formatted = format_for_prompt(messages, max_messages=40)
+def run_layer_b(llm, messages, session_id, source_name, meta_extra=None, max_prompt_messages=40):
+    formatted = format_for_prompt(messages, max_messages=max_prompt_messages)
     prefs_block = format_preferences_for_prompt()
     corrections_block = format_corrections_for_prompt(n=20)
     active = get_active_parent_projects() or get_active_projects()
@@ -123,6 +148,10 @@ def run_layer_b(llm, messages, session_id, source_name):
         "extraction_seconds": round(elapsed, 1),
         "extracted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # Per-source provenance (e.g. web captures override source with the real
+    # platform and add url/title so the dashboard can show where it came from).
+    if meta_extra:
+        card["_meta"].update({k: v for k, v in meta_extra.items() if v is not None})
     out_path = CARDS_DIR / f"{session_id}.json"
     out_path.write_text(json.dumps(card, indent=2, ensure_ascii=False))
     return card, elapsed
@@ -130,11 +159,19 @@ def run_layer_b(llm, messages, session_id, source_name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("source", choices=["obsidian", "apple-notes"])
+    parser.add_argument("source", choices=["obsidian", "apple-notes", "web"])
     parser.add_argument("count", type=int)
-    parser.add_argument("--max-msg", type=int, default=1, help="cap on messages per session (notes are 1)")
+    parser.add_argument("--max-msg", type=int, default=None,
+                        help="cap on Layer-A messages per session (notes default 1, web default all)")
     parser.add_argument("--layer", choices=["a", "b", "both"], default="both")
     args = parser.parse_args()
+
+    # Web captures are real conversations, not single notes: default to all
+    # messages for Layer A and a generous Layer-B prompt cap. Notes default to 1.
+    is_web = args.source == "web"
+    if args.max_msg is None:
+        args.max_msg = 0 if is_web else 1  # 0 = no cap in run_layer_a
+    max_prompt_messages = 200 if is_web else 40
 
     source = get_source(args.source)
     print(f">>> Source: {source['name']} — {source['label']}")
@@ -174,7 +211,12 @@ def main():
                 n, t = run_layer_a(m, messages, metadata, args.max_msg)
                 print(f"  Layer A: ✓ {n} facts in {t:.0f}s")
             if args.layer in ("b", "both"):
-                card, t = run_layer_b(llm, messages, sid, source["name"])
+                meta_extra = source["provenance"](target) if source.get("provenance") else None
+                card, t = run_layer_b(
+                    llm, messages, sid, source["name"],
+                    meta_extra=meta_extra,
+                    max_prompt_messages=max_prompt_messages,
+                )
                 proj = card.get("project_match", {}).get("id", "?")
                 opens = len(card.get("open_items", []))
                 sparks = len(card.get("sparks", []))

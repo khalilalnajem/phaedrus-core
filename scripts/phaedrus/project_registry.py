@@ -35,6 +35,15 @@ EXCLUDE = {
     "Documents", "Untitled",  # generic
 }
 
+# Tooling / export / env folders that are NOT real projects. Checked against the
+# normalised slug (so "ChatGPT Export" and "chatgpt-export" both match), this
+# keeps a re-scan from resurrecting the junk that was curated out of projects.yml.
+EXCLUDE_SLUGS = {
+    "codex", "chatgpt-export", "claude-cloud-export", "claude-code-mlx-proxy",
+    "mlx-env", "models", "free-code", "fine-tune", "xcode-projects",
+    "khalil-os", "personal-os", "icloud-drive", "mac-whisper", "zoom", "pixel",
+}
+
 
 def normalize_slug(name: str) -> str:
     """Make slugs case-insensitive and underscore/hyphen consistent."""
@@ -66,6 +75,8 @@ def scan_local_folders() -> dict:
         if not entry.is_dir():
             continue
         if entry.name in EXCLUDE or entry.name.startswith("."):
+            continue
+        if normalize_slug(entry.name) in EXCLUDE_SLUGS:
             continue
         try:
             mtime = entry.stat().st_mtime
