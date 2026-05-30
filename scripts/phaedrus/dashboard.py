@@ -288,6 +288,14 @@ STATUS_META = {
     "archived": ("Archived", "var(--ink-3)", "var(--surface-2)"),
 }
 
+# platform source -> display label (shared by triage + cards)
+SOURCE_LABEL = {
+    "claude": "Claude", "claude-code": "Claude Code", "chatgpt": "ChatGPT",
+    "gemini": "Gemini", "grok": "Grok", "perplexity": "Perplexity",
+    "deepseek": "DeepSeek", "obsidian": "Obsidian", "apple-notes": "Apple Notes",
+    "codex": "Codex",
+}
+
 
 # === Pages ===
 
@@ -309,8 +317,19 @@ def page_triage():
             pill_class, label, accent = TYPE_BADGES.get(t, ("pill-neutral", t or "note", "var(--ink-3)"))
             topic = (card.get("topic") or "Untitled").strip()
             text = (item.get("text") or "").strip()
+            meta = card.get("_meta", {}) or {}
+            src = (meta.get("source") or "").lower()
+            src_label = SOURCE_LABEL.get(src, src.title() if src else "")
+            src_chip = (f'<span class="chip" style="background:var(--accent-soft);color:var(--accent-ink)">{src_label}</span>'
+                        if src_label else "")
+            date = (meta.get("extracted_at") or "")[:10]
+            date_meta = f'<span class="meta">{date}</span>' if date else ""
             proj = item.get("project") or card.get("project_match", {}).get("id", "")
-            proj_chip = f'<span class="chip">{proj}</span>' if proj and proj not in ("none", "new") else ""
+            proj_txt = f" · {proj}" if proj and proj not in ("none", "new") else ""
+            ctx = (card.get("context") or "").strip()
+            ctx_excerpt = (ctx[:170].rsplit(" ", 1)[0] + "…") if len(ctx) > 170 else ctx
+            ctx_html = (f'<div style="margin-top:9px;font-size:13.5px;color:var(--ink-2);line-height:1.45">{ctx_excerpt}</div>'
+                        if ctx_excerpt else "")
             where = (item.get("where_to_use") or card.get("where_to_use") or "").strip()
             where_html = f'<div class="meta" style="margin-top:10px;color:var(--accent-ink)">↳ {where}</div>' if where else ""
             session_id = card["_session_id"]
@@ -319,12 +338,14 @@ def page_triage():
             <div class="card card-hover fade-in" style="border-left:3px solid {accent}">
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px">
                     <span class="pill {pill_class}"><span class="pdot"></span>{label}</span>
-                    {proj_chip}
+                    <span style="display:flex;align-items:center;gap:8px">{src_chip}{date_meta}</span>
                 </div>
                 <div style="font-size:16px;line-height:1.5;color:var(--ink)">{text}</div>
-                <div class="meta" style="margin-top:7px">from “{topic}”</div>
+                <div class="meta" style="margin-top:7px">from “{topic}”{proj_txt}</div>
+                {ctx_html}
                 {where_html}
-                <div style="display:flex;gap:8px;margin-top:17px" hx-target="this" hx-swap="outerHTML">
+                <a href="/cards/{session_id}" class="meta" style="display:inline-block;margin-top:9px;color:var(--accent-ink)">Open full card →</a>
+                <div style="display:flex;gap:8px;margin-top:15px" hx-target="this" hx-swap="outerHTML">
                     <button class="btn btn-keep" hx-post="/triage/decide" hx-vals='{{"key": "{key}", "decision": "keep", "text": "{safe_text[:200]}", "session_id": "{session_id}"}}'>Keep</button>
                     <button class="btn btn-ghost" hx-post="/triage/decide" hx-vals='{{"key": "{key}", "decision": "ignore", "text": "{safe_text[:200]}", "session_id": "{session_id}"}}'>Ignore</button>
                     <button class="btn btn-soft" hx-post="/triage/decide" hx-vals='{{"key": "{key}", "decision": "later", "text": "{safe_text[:200]}", "session_id": "{session_id}"}}'>Later</button>
