@@ -256,6 +256,7 @@ BASE = """
       <a href="/" class="tab {% if active == 'triage' %}on{% endif %}">Triage</a>
       <a href="/cards" class="tab {% if active == 'cards' %}on{% endif %}">Cards</a>
       <a href="/projects" class="tab {% if active == 'projects' %}on{% endif %}">Projects</a>
+      <a href="/import" class="tab {% if active == 'import' %}on{% endif %}">Import</a>
       <a href="/settings" class="tab {% if active == 'settings' %}on{% endif %}">Settings</a>
     </div>
   </div>
@@ -713,6 +714,119 @@ def capture():
     resp = jsonify({"ok": True, "saved_to": str(out_path), "source": source})
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
+
+
+# === Export-file import ===
+
+@app.route("/import", methods=["GET"])
+def page_import():
+    SH = "font-family:var(--serif);font-size:18px;font-weight:600;margin:0 0 6px"
+    steps = [
+        ("ChatGPT", "Settings → Data Controls → Export data. Emailed link; open the .zip."),
+        ("Claude", "Settings → Privacy → Export data. Emailed within hours; link lasts 24h."),
+        ("Gemini", "Google Takeout → deselect all → pick “My Activity” → Gemini Apps → JSON."),
+        ("Perplexity", "Settings → Account → Download My Data."),
+        ("DeepSeek", "Email service@deepseek.com for a data export (no self-serve)."),
+    ]
+    steps_html = "".join(
+        f'<div class="card" style="padding:13px 16px"><div style="font-weight:600;font-size:14px">{name}</div>'
+        f'<div class="meta" style="margin-top:3px">{how}</div></div>'
+        for name, how in steps
+    )
+    content = f"""
+    <div class="narrow">
+      <h1 class="page-h">Import your history</h1>
+      <p class="page-sub">Drop an export file from any AI platform. Everything is parsed on your machine — nothing is uploaded anywhere.</p>
+
+      <form id="imp" hx-post="/import" hx-encoding="multipart/form-data" hx-target="#imp-result" hx-swap="innerHTML"
+            style="margin-bottom:26px">
+        <label id="drop" for="file" style="display:block;border:1.5px dashed var(--line-2);border-radius:var(--radius);
+               padding:38px 24px;text-align:center;cursor:pointer;background:var(--surface);transition:border-color .15s">
+          <div style="font-family:var(--serif);font-size:17px;color:var(--ink);margin-bottom:5px">Choose an export file</div>
+          <div class="meta">.zip or .json — ChatGPT, Claude, Gemini, Perplexity, DeepSeek</div>
+          <input id="file" name="file" type="file" accept=".zip,.json" style="display:none"
+                 onchange="document.getElementById('fname').textContent=this.files[0]?this.files[0].name:''">
+          <div id="fname" class="chip" style="margin-top:12px;display:inline-block"></div>
+        </label>
+        <button class="btn btn-keep" style="margin-top:14px" type="submit">Import</button>
+        <span id="imp-spin" class="htmx-indicator meta" style="margin-left:10px">Parsing…</span>
+      </form>
+
+      <div id="imp-result"></div>
+
+      <h2 style="{SH};margin-top:34px">Where to get each export</h2>
+      <div style="display:grid;gap:9px">{steps_html}</div>
+    </div>
+    <style>
+      #imp.htmx-request #imp-spin {{ opacity:1 }}
+      .htmx-indicator {{ opacity:0; transition:opacity .15s }}
+      #drop:hover {{ border-color: var(--accent) }}
+    </style>
+    """
+    return render_template_string(BASE, page_title="Import", active="import", content=content)
+
+
+@app.route("/import", methods=["POST"])
+def do_import():
+    import import_exports
+
+    f = request.files.get("file")
+    if not f:
+        return '<div class="card" style="border-left:3px solid var(--warn)">No file received. Pick an export file and try again.</div>'
+    raw = f.read()
+    if not raw:
+        return '<div class="card" style="border-left:3px solid var(--warn)">That file was empty.</div>'
+
+    try:
+        result = import_exports.import_bytes(raw, filename=f.filename or "")
+    except Exception as e:
+        return f'<div class="card" style="border-left:3px solid var(--warn)">Could not parse that file: {e}</div>'
+
+    records = result.get("records", [])
+    if not records:
+        errs = "; ".join(result.get("errors", [])) or "no conversations recognised in that file"
+        return (f'<div class="card" style="border-left:3px solid var(--warn)">'
+                f'<div style="font-weight:600">Nothing imported</div>'
+                f'<div class="meta" style="margin-top:4px">{errs}. '
+                f'Make sure it’s the conversations export (not the account-info file).</div></div>')
+
+    # Write each conversation as a capture file the ingester already understands.
+    written = 0
+    for r in records:
+        try:
+            safe_source = "".join(c for c in str(r.get("source", "import")) if c.isalnum() or c in "-._") or "import"
+            raw_id = str(r.get("id", ""))
+            # The importer's ids already carry the source prefix (e.g. "chatgpt_abc").
+            # Strip it so the on-disk filename matches the live backfill's
+            # ("<source>_<id>"), giving true cross-path dedupe between an export
+            # import and an API backfill of the same conversation.
+            if raw_id.startswith(safe_source + "_"):
+                raw_id = raw_id[len(safe_source) + 1:]
+            safe_id = "".join(c for c in raw_id if c.isalnum() or c in "-._")[:80] or str(int(time.time() * 1000))
+            record = {
+                "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "source": r.get("source", "import"),
+                "id": r.get("id", safe_id),
+                "url": r.get("url", ""),
+                "title": r.get("title", ""),
+                "captured_at": r.get("captured_at", ""),
+                "messages": r.get("messages", []),
+                "raw": {"imported_from_export": True, **r},
+            }
+            (WEB_CAPTURES_DIR / f"{safe_source}_{safe_id}.json").write_text(
+                json.dumps(record, indent=2, ensure_ascii=False)
+            )
+            written += 1
+        except Exception:
+            continue
+
+    by_platform = result.get("by_platform", {})
+    bp = " · ".join(f"{k}: {v}" for k, v in by_platform.items())
+    return (f'<div class="card fade-in" style="border-left:3px solid var(--ok)">'
+            f'<div style="font-weight:600;font-size:15px">Imported {written} conversation{"s" if written != 1 else ""}</div>'
+            f'<div class="meta" style="margin-top:5px">{bp}</div>'
+            f'<div class="meta" style="margin-top:8px">Saved locally to <code>~/.phaedrus/web_captures/</code>. '
+            f'They’ll become cards on the next extraction run.</div></div>')
 
 
 # === Boot ===
