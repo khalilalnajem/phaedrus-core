@@ -297,6 +297,42 @@ SOURCE_LABEL = {
     "codex": "Codex",
 }
 
+# Tiny inline provider glyphs (monochrome, inherit currentColor) — a recognisable
+# mark per source without shipping logo assets. 14px, sits inline before the label.
+_PROVIDER_GLYPH = {
+    # Claude — starburst
+    "claude": '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l1.9 6.1L20 6.5l-4.3 4.6L20 17l-6.1-1.6L12 22l-1.9-6.6L4 17l4.3-5.9L4 6.5l6.1 1.6z"/></svg>',
+    # ChatGPT — ring
+    "chatgpt": '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg>',
+    # Gemini — sparkle/diamond
+    "gemini": '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2c.6 5.4 4.6 9.4 10 10-5.4.6-9.4 4.6-10 10-.6-5.4-4.6-9.4-10-10 5.4-.6 9.4-4.6 10-10z"/></svg>',
+    # Grok — slash
+    "grok": '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 19L18 5M10 19l8-9"/></svg>',
+    # Perplexity — node
+    "perplexity": '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v6M12 16v6M4 7l5 3M20 7l-5 3"/></svg>',
+    # DeepSeek — whale curve
+    "deepseek": '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 14c4 4 14 4 18-4-2 6-8 9-13 7"/></svg>',
+    "obsidian": '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l7 5-3 13H8L5 7z"/></svg>',
+    "apple-notes": '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>',
+    "codex": '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg>',
+}
+_PROVIDER_GLYPH["claude-code"] = _PROVIDER_GLYPH["codex"]
+
+
+def provider_chip(src: str, url: str = "", *, link: bool = True) -> str:
+    """A source chip with the provider glyph + label. If url + link, deep-links to
+    the original conversation (opens new tab)."""
+    src = (src or "").lower()
+    if not src:
+        return ""
+    label = SOURCE_LABEL.get(src, src.title())
+    glyph = _PROVIDER_GLYPH.get(src, "")
+    inner = f'<span style="display:inline-flex;align-items:center;gap:5px">{glyph}{label}</span>'
+    style = "background:var(--accent-soft);color:var(--accent-ink)"
+    if link and url:
+        return f'<a href="{url}" target="_blank" rel="noopener" class="chip" style="{style};text-decoration:none">{inner}</a>'
+    return f'<span class="chip" style="{style}">{inner}</span>'
+
 
 # === Pages ===
 
@@ -320,9 +356,7 @@ def page_triage():
             text = (item.get("text") or "").strip()
             meta = card.get("_meta", {}) or {}
             src = (meta.get("source") or "").lower()
-            src_label = SOURCE_LABEL.get(src, src.title() if src else "")
-            src_chip = (f'<span class="chip" style="background:var(--accent-soft);color:var(--accent-ink)">{src_label}</span>'
-                        if src_label else "")
+            src_chip = provider_chip(src, link=False)
             date = (meta.get("extracted_at") or "")[:10]
             date_meta = f'<span class="meta">{date}</span>' if date else ""
             proj = item.get("project") or card.get("project_match", {}).get("id", "")
@@ -398,7 +432,6 @@ def page_cards():
         meta = card.get("_meta", {})
         extracted = (meta.get("extracted_at", "") or "")[:10]
         src = (meta.get("source") or "").lower()
-        src_label = SOURCE_LABEL.get(src, src.title() if src else "")
         opens = len(card.get("open_items", []) or [])
         sparks = len(card.get("sparks", []) or [])
         links = len(card.get("links", []) or [])
@@ -408,7 +441,7 @@ def page_cards():
         if links: bits.append(f"{links} link" + ("s" if links != 1 else ""))
         stats = " · ".join(bits)
         proj_chip = f'<span class="chip">{proj}</span>' if proj and proj not in ("none", "new") else ""
-        src_chip = f'<span class="chip" style="background:var(--accent-soft);color:var(--accent-ink)">{src_label}</span>' if src_label else ""
+        src_chip = provider_chip(src, link=False)
         rows += f"""
         <a href="/cards/{card['_session_id']}" class="card card-hover" style="display:block">
             <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:9px">
@@ -446,10 +479,8 @@ def page_card_detail(session_id):
 
     LABEL = "font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--ink-3)"
 
-    def section(title, items, key_field=None):
-        if not items:
-            return ""
-        html = f'<h3 style="{LABEL};margin:26px 0 10px">{title}</h3><div style="display:grid;gap:9px">'
+    def _items_html(items, key_field=None):
+        html = '<div style="display:grid;gap:9px">'
         for it in items:
             if isinstance(it, dict):
                 primary = it.get(key_field) if key_field else (it.get("text") or it.get("url") or it.get("name") or it.get("path") or "")
@@ -469,6 +500,24 @@ def page_card_detail(session_id):
         html += '</div>'
         return html
 
+    # Essence sections: always open (the stuff you actually act on).
+    def section(title, items, key_field=None):
+        if not items:
+            return ""
+        return f'<h3 style="{LABEL};margin:26px 0 10px">{title}</h3>{_items_html(items, key_field)}'
+
+    # Reference sections: collapsed by default — just a count, expand on demand.
+    # This is the anti-overwhelm fix: a 78-link card opens calm, depth is one click.
+    def fold(title, items, key_field=None):
+        if not items:
+            return ""
+        n = len(items)
+        return (f'<details style="margin-top:14px;border-top:1px solid var(--line);padding-top:14px">'
+                f'<summary style="cursor:pointer;{LABEL};list-style:none;display:flex;align-items:center;gap:8px">'
+                f'<span style="color:var(--accent-ink)">▸</span>{title} '
+                f'<span class="chip" style="text-transform:none;letter-spacing:0">{n}</span></summary>'
+                f'<div style="margin-top:12px">{_items_html(items, key_field)}</div></details>')
+
     anchors = card.get("memory_anchors") or []
     where = (card.get("where_to_use") or "").strip()
     highlight = ""
@@ -480,20 +529,22 @@ def page_card_detail(session_id):
         w_html = f"<div><div style='{LABEL};margin-bottom:5px'>Where to use</div><div style='font-size:14.5px;line-height:1.5'>{where}</div></div>" if where else ""
         highlight = f"<div style='background:var(--accent-soft);border-radius:var(--radius);padding:17px 19px;margin-bottom:18px'>{a_html}{w_html}</div>"
 
-    src_chip = ""
-    if src:
-        disp = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek"}.get(src, src.title())
-        if url:
-            src_chip = f'<a href="{url}" target="_blank" rel="noopener" class="chip" style="background:var(--accent-soft);color:var(--accent-ink)">{disp} ↗</a>'
-        else:
-            src_chip = f'<span class="chip">{disp}</span>'
+    # Prominent deep-link to the original conversation (not a tiny chip).
+    open_convo = ""
+    if url:
+        open_convo = (f'<a href="{url}" target="_blank" rel="noopener" class="btn btn-keep" '
+                      f'style="display:inline-flex;align-items:center;gap:7px;text-decoration:none;margin-bottom:18px">'
+                      f'{_PROVIDER_GLYPH.get(src, "")} Open the original conversation →</a>')
+
+    src_chip = provider_chip(src, url, link=False)  # chip in the meta row stays non-link (button does the linking)
 
     content = f"""
     <a href="/cards" class="meta" style="color:var(--ink-2)">← Back to cards</a>
     <h1 class="page-h" style="margin-top:12px">{card.get('topic', 'Untitled')}</h1>
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:22px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:18px">
         {f'<span class="chip">{proj}</span>' if proj else ''}{src_chip}
     </div>
+    {open_convo}
     {highlight}
     <div class="card">
         <h3 style="{LABEL};margin:0 0 8px">Context</h3>
@@ -502,11 +553,11 @@ def page_card_detail(session_id):
         <p style="margin:0">{card.get('conclusion', '—')}</p>
         {section('Open items', card.get('open_items', []))}
         {section('Sparks', card.get('sparks', []))}
-        {section('Links', card.get('links', []), key_field='url')}
-        {section('People', card.get('people', []), key_field='name')}
-        {section('References', card.get('references', []), key_field='name')}
-        {section('Numbers', card.get('numbers', []), key_field='value')}
-        {section('Files', card.get('files', []), key_field='path')}
+        {fold('Links', card.get('links', []), key_field='url')}
+        {fold('People', card.get('people', []), key_field='name')}
+        {fold('References', card.get('references', []), key_field='name')}
+        {fold('Numbers', card.get('numbers', []), key_field='value')}
+        {fold('Files', card.get('files', []), key_field='path')}
     </div>
     """
     return render_template_string(BASE, page_title="Card", active="cards", content=content)
