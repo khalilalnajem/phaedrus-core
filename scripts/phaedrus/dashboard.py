@@ -754,10 +754,12 @@ def page_import():
         },
         {
             "name": "Perplexity", "key": "perplexity",
-            "auto": {"eta": "~5–10 min", "note": "Click the extension on perplexity.ai → “Pull my history”. It opens your Library, scrolls it, and captures every thread the page loads (gets past their 20-chat API cap)."},
-            "manual": {"eta": "—", "url": "", "btn": "",
-                       "steps": ["No export needed — use the automatic pull (the extension watches your Library load and grabs everything).",
-                                 "Perplexity has no self-serve export file anyway (we checked), so automatic is the way."]},
+            "auto": {"eta": "latest ~20", "note": "The extension captures Perplexity going forward automatically, and grabs your most recent ~20 on demand. Full back-catalogue needs the email request (Perplexity caps the rest)."},
+            "manual": {"eta": "1–3 days", "url": "mailto:support@perplexity.ai?subject=Data%20export%20request%20(GDPR%2FCCPA)&body=Hello%2C%0A%0AUnder%20GDPR%2FCCPA%20I%20request%20a%20full%20copy%20of%20my%20Perplexity%20thread%20history%20and%20account%20data%20in%20a%20machine-readable%20format%20(JSON%20preferred).%0A%0AThank%20you.", "btn": "Open pre-filled email",
+                       "steps": ["Perplexity has no self-serve export and caps history at ~20 threads.",
+                                 "Click below: opens a pre-written GDPR data-request email to support@perplexity.ai — just hit Send.",
+                                 "They reply with a file; drop it in the box above when it arrives.",
+                                 "Meanwhile the extension captures Perplexity going forward automatically."]},
         },
         {
             "name": "DeepSeek", "key": "deepseek",

@@ -272,11 +272,89 @@ def parse_deepseek_export(data) -> list:
     return out
 
 
+# ---------- Grok (xAI account export) ----------
+
+def parse_grok_export(data) -> list:
+    """xAI 'prod-grok-backend.json': {conversations: [{conversation:{id,title,create_time},
+    responses:[{response:{message, sender, create_time}}]}]}."""
+    out = []
+    convs = data.get("conversations", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    for wrap in convs:
+        try:
+            conv = wrap.get("conversation", {}) if isinstance(wrap, dict) else {}
+            responses = wrap.get("responses", []) if isinstance(wrap, dict) else []
+            messages = []
+            for r in responses:
+                resp = r.get("response", {}) if isinstance(r, dict) else {}
+                content = _clean(resp.get("message"))
+                if not content:
+                    continue
+                role = "user" if resp.get("sender") in ("human", "user") else "assistant"
+                messages.append({"role": role, "content": content})
+            if not messages:
+                continue
+            cid = conv.get("id") or ""
+            out.append({
+                "id": "grok_" + str(cid) if cid else "grok_" + str(abs(hash(str(conv))))[:12],
+                "source": "grok",
+                "title": conv.get("title") or "Grok conversation",
+                "url": "",
+                "captured_at": _iso(conv.get("create_time")) or _iso(conv.get("modify_time")),
+                "messages": messages,
+            })
+        except Exception:
+            continue
+    return out
+
+
+# ---------- Gemini in Workspace (conversation_*.txt = JSON of conversation_turns) ----------
+
+def parse_gemini_workspace(data) -> list:
+    """A single 'Gemini in Workspace' conversation file: {conversation_turns:[
+    {user_turn:{prompt}}, {system_turn:{...}}]}. Returns ONE conversation record."""
+    turns = data.get("conversation_turns", []) if isinstance(data, dict) else []
+    messages = []
+    first_ts = ""
+    for t in turns:
+        if not isinstance(t, dict):
+            continue
+        if "user_turn" in t:
+            q = _clean((t["user_turn"] or {}).get("prompt"))
+            if q:
+                messages.append({"role": "user", "content": q})
+            if not first_ts:
+                first_ts = (t["user_turn"] or {}).get("turn_last_modified") or ""
+        elif "system_turn" in t:
+            st = t["system_turn"] or {}
+            # answer text: Gemini Workspace puts it in text=[{data: "..."}] (a list).
+            a = ""
+            txt = st.get("text")
+            if isinstance(txt, list):
+                a = _clean(" ".join(_clean(x.get("data")) for x in txt if isinstance(x, dict)))
+            elif isinstance(txt, str):
+                a = _clean(txt)
+            if not a:
+                a = _clean(st.get("response") or st.get("answer"))
+            if a:
+                messages.append({"role": "assistant", "content": a})
+    if not messages:
+        return []
+    return [{
+        "id": "gemini_ws_" + str(abs(hash(str(turns))))[:12],
+        "source": "gemini",
+        "title": (messages[0]["content"][:60] if messages else "Gemini conversation"),
+        "url": "",
+        "captured_at": _iso(first_ts),
+        "messages": messages,
+    }]
+
+
 # ---------- sniffing + dispatch ----------
 
 PARSERS = {
     "chatgpt": parse_chatgpt_export,
     "claude": parse_claude_export,
+    "grok": parse_grok_export,
     "gemini": parse_gemini_takeout,
     "perplexity": parse_perplexity_export,
     "deepseek": parse_deepseek_export,
