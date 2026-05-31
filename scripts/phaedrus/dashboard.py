@@ -152,20 +152,20 @@ BASE = """
 <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 <style>
   :root {
-    --bg: #faf8f4;
-    --surface: #ffffff;
-    --surface-2: #f4f1ea;
-    --ink: #211f1b;
-    --ink-2: #6c685f;
-    --ink-3: #a39d92;
-    --line: rgba(33,31,27,0.09);
-    --line-2: rgba(33,31,27,0.16);
-    --accent: #be5d39;
+    --bg: #f6f2ea;
+    --surface: #fffdf8;
+    --surface-2: #efe9dd;
+    --ink: #221e18;
+    --ink-2: #6b6353;
+    --ink-3: #a59c88;
+    --line: rgba(34,30,24,0.10);
+    --line-2: rgba(34,30,24,0.16);
+    --accent: #c2603d;
     --accent-ink: #9c441f;
-    --accent-soft: #f6e7df;
-    --ok: #3f7d54; --ok-soft: #e7f0e9;
-    --warn: #b07a1d; --warn-soft: #f6edda;
-    --info: #3a6ea5; --info-soft: #e6eef6;
+    --accent-soft: #f3e2d6;
+    --ok: #4a7a52; --ok-soft: #e6efe4;
+    --warn: #a9701f; --warn-soft: #f5ead2;
+    --info: #3d6589; --info-soft: #e4ecf3;
     --serif: "Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
     --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Helvetica,Arial,sans-serif;
     --radius: 14px; --radius-sm: 9px;
@@ -224,7 +224,7 @@ BASE = """
 
   /* Buttons */
   .btn { font: inherit; font-size: 13.5px; font-weight: 500; border: 1px solid transparent;
-         padding: 7px 14px; border-radius: var(--radius-sm); cursor: pointer; transition: all .14s; }
+         padding: 8px 18px; border-radius: 999px; cursor: pointer; transition: all .14s; }
   .btn-keep { background: var(--ink); color: #fff; }
   .btn-keep:hover { background: #000; }
   .btn-ghost { background: transparent; color: var(--ink-2); border-color: var(--line-2); }
@@ -341,7 +341,7 @@ def page_triage():
                     <span class="pill {pill_class}"><span class="pdot"></span>{label}</span>
                     <span style="display:flex;align-items:center;gap:8px">{src_chip}{date_meta}</span>
                 </div>
-                <div style="font-size:16px;line-height:1.5;color:var(--ink)">{text}</div>
+                <div class="quote" style="font-size:19px">{text}</div>
                 <div class="meta" style="margin-top:7px">from “{topic}”{proj_txt}</div>
                 {ctx_html}
                 {where_html}
