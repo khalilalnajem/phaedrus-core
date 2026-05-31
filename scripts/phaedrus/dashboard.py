@@ -754,22 +754,20 @@ def page_import():
         },
         {
             "name": "Perplexity", "key": "perplexity",
-            "auto": None,
-            "manual": {"eta": "varies", "url": "", "btn": "",
-                       "steps": ["Heads up: Perplexity has NO self-serve export in its settings (we checked — Account and Preferences both lack it).",
-                                 "Easiest: just install the extension and let it capture Perplexity going forward — skip the history.",
-                                 "If you really want the back-catalogue: a third-party “Perplexity thread exporter” browser extension can scrape your library, then drop that file above.",
-                                 "Or email Perplexity support for a privacy/GDPR data request (slow)."]},
+            "auto": {"eta": "~5–10 min", "note": "Click the extension on perplexity.ai → “Pull my history”. It opens your Library, scrolls it, and captures every thread the page loads (gets past their 20-chat API cap)."},
+            "manual": {"eta": "—", "url": "", "btn": "",
+                       "steps": ["No export needed — use the automatic pull (the extension watches your Library load and grabs everything).",
+                                 "Perplexity has no self-serve export file anyway (we checked), so automatic is the way."]},
         },
         {
             "name": "DeepSeek", "key": "deepseek",
             "auto": None,
-            "manual": {"eta": "1–3 days", "url": "", "btn": "",
-                       "steps": ["DeepSeek has no self-serve export either.",
-                                 "Email service@deepseek.com and request a copy of your data (a GDPR/CCPA data request).",
+            "manual": {"eta": "1–3 days", "url": "mailto:service@deepseek.com?subject=Data%20export%20request%20(GDPR%2FCCPA)&body=Hello%2C%0A%0AUnder%20GDPR%2FCCPA%20I%20request%20a%20full%20copy%20of%20my%20DeepSeek%20conversation%20history%20and%20account%20data%20in%20a%20machine-readable%20format%20(JSON%20preferred).%0A%0AThank%20you.", "btn": "Open pre-filled email",
+                       "steps": ["DeepSeek has no self-serve export — you request it by email.",
+                                 "Click the button below: it opens a pre-written GDPR data-request email to service@deepseek.com — just hit Send.",
                                  "They reply with a file, usually within a few days.",
-                                 "Drop that file above when it arrives.",
-                                 "Or just install the extension and capture DeepSeek going forward."]},
+                                 "Drop that file in the box above when it arrives.",
+                                 "Meanwhile the extension captures DeepSeek going forward automatically."]},
         },
     ]
 
@@ -795,8 +793,11 @@ def page_import():
         # Manual path cell with expandable real steps
         m = p["manual"]
         steps_li = "".join(f'<li style="margin:5px 0;font-size:13px;color:var(--ink-2);line-height:1.5">{s}</li>' for s in m["steps"])
-        open_btn = (f'<a href="{m["url"]}" target="_blank" rel="noopener" class="btn btn-soft" '
-                    f'style="display:inline-block;margin-top:10px;text-decoration:none;font-size:12.5px">{m["btn"]} ↗</a>') if m.get("url") else ""
+        _is_mail = m.get("url", "").startswith("mailto:")
+        _tgt = "" if _is_mail else ' target="_blank" rel="noopener"'
+        _arrow = "" if _is_mail else " ↗"
+        open_btn = (f'<a href="{m["url"]}"{_tgt} class="btn btn-soft" '
+                    f'style="display:inline-block;margin-top:10px;text-decoration:none;font-size:12.5px">{m["btn"]}{_arrow}</a>') if m.get("url") else ""
         manual_cell = (
             f'<div style="flex:1;min-width:200px">'
             f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
