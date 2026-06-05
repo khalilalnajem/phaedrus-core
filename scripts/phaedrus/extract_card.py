@@ -60,6 +60,8 @@ Return ONE JSON object with this exact shape. No prose. No markdown fences. JSON
       "type": "commitment | worry | idea | question",
       "project": "matched project id or 'none'",
       "due": "ISO date if explicit, else null",
+      "status": "done | open | uncertain — see ITEM STATUS rules. Default open/uncertain, NEVER guess done.",
+      "status_reason": "1 short sentence: the evidence FROM THE CONVERSATION for this status (quote if you can).",
       "where_to_use": "1 sentence: WHEN and WHERE this should be surfaced for action. Examples: 'Before next MOHE check-in this week — Shaymaa is waiting on this', 'When planning sanad-mvp infrastructure for v2', 'First thing tomorrow morning while still fresh'. Concrete, contextual, actionable."
     }
   ],
@@ -151,6 +153,13 @@ DO NOT classify as commitments:
 - Hypothetical or exploratory statements ("we could try X" without "I'll")
 
 If something is more spark than commitment (an idea Khalil mentioned without committing to act), put it in sparks[] with type=idea, NOT in open_items[] with type=commitment.
+
+ITEM STATUS (critical — this decides what resurfaces in daily triage; DO NOT GUESS):
+For every open_item, judge whether Khalil ACTUALLY completed or resolved it, based ONLY on what THIS conversation shows:
+- "done": the conversation clearly shows it finished — he says he did it, the assistant confirms it shipped/works, the bug is fixed, the question is answered. Put the proof in status_reason (quote it).
+- "open": the conversation shows it is still pending — raised but not resolved, deferred ("later", "next session"), or left hanging.
+- "uncertain": the conversation does NOT make completion clear either way.
+RULES: Never mark "done" on a guess or an assumption. If you are not sure, use "uncertain" — Khalil will be ASKED rather than misled (he would rather be asked than have you assume). Default to "open" or "uncertain". "done" requires explicit evidence you can quote. This mirrors his anti-sycophancy / anti-hallucination discipline: cite the evidence or admit uncertainty.
 
 PEOPLE / REFERENCES / NUMBERS / FILES:
 - people: any human name mentioned (not Khalil himself, not the assistant). Include with role/context.

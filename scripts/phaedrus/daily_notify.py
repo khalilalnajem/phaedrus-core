@@ -16,11 +16,10 @@ Run:
 
 This file is intentionally standalone. It does NOT import dashboard.py (which
 would boot Flask). It replicates dashboard.py's read-only counting logic:
-load_all_cards + get_triage_decisions + the same pending filter. Counting is
-read-only — it never writes to ~/.phaedrus.
+load_all_cards + get_triage_decisions + the same per-conversation pending
+filter (decision key = session_id). Counting is read-only — never writes.
 """
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
@@ -66,17 +65,11 @@ def get_triage_decisions():
     return decided
 
 
-def item_key(session_id: str, kind: str, text: str) -> str:
-    """Mirror of dashboard.item_key — must match exactly so decisions line up."""
-    h = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
-    return f"{session_id}:{kind}:{h}"
-
-
-def _is_pending(session_id: str, kind: str, text: str, decisions: dict, now_iso: str) -> bool:
-    """A card item is pending unless it's been kept/ignored/done, or deferred
-    with a later_until still in the future. Same rule as get_triage_candidates."""
-    key = item_key(session_id, kind, text)
-    d = decisions.get(key)
+def _card_pending(session_id: str, decisions: dict, now_iso: str) -> bool:
+    """A conversation is pending unless it's been kept/ignored/done, or deferred
+    with a later_until still in the future. Triage is per-conversation now, so
+    the decision key is the session_id — must match dashboard.get_triage_cards."""
+    d = decisions.get(session_id)
     if not d:
         return True
     decision = d.get("decision")
@@ -92,10 +85,10 @@ def _is_pending(session_id: str, kind: str, text: str, decisions: dict, now_iso:
 def count_pending():
     """Return (conversations_pending, items_pending).
 
-    conversations_pending = cards with at least one undecided item — the "N
-    conversations to review" headline. items_pending = individual open_items +
-    sparks still awaiting a decision. Unlike get_triage_candidates this applies
-    NO limit / per-project cap: it's the true backlog, not the daily top slice.
+    conversations_pending = undecided conversations — the "N conversations to
+    review" headline, matching the dashboard's per-card triage. items_pending =
+    open_items + sparks inside those pending conversations, shown in the body for
+    context. NO limit / per-project cap: this is the true backlog, not a slice.
     """
     cards = load_all_cards()
     decisions = get_triage_decisions()
@@ -104,18 +97,12 @@ def count_pending():
     conversations = 0
     items = 0
     for card in cards:
-        sid = card["_session_id"]
-        card_has_pending = False
-        for it in card.get("open_items", []) or []:
-            if _is_pending(sid, "open_item", it.get("text", ""), decisions, now_iso):
-                items += 1
-                card_has_pending = True
-        for spark in card.get("sparks", []) or []:
-            if _is_pending(sid, "spark", spark.get("text", ""), decisions, now_iso):
-                items += 1
-                card_has_pending = True
-        if card_has_pending:
+        triage_items = (card.get("open_items") or []) + (card.get("sparks") or [])
+        if not triage_items:
+            continue
+        if _card_pending(card["_session_id"], decisions, now_iso):
             conversations += 1
+            items += len(triage_items)
     return conversations, items
 
 

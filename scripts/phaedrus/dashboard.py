@@ -17,6 +17,7 @@ Pages:
     /settings   — preferences, rules, corrections
 """
 import json
+import os
 import sys
 import time
 import webbrowser
@@ -30,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from projects_config import load_config, write_config, show_summary
 from preferences import load_preferences, PREFS_PATH
 from corrections import load_recent_corrections, load_rules, record_correction
+from provider_icons import provider_svg  # real brand marks (lobehub/icons, MIT)
 
 PHAEDRUS_HOME = Path.home() / ".phaedrus"
 CARDS_DIR = PHAEDRUS_HOME / "cards"
@@ -67,6 +69,9 @@ def get_triage_decisions():
     return decided
 
 
+LATER_SCHEDULE_DAYS = [3, 7, 14, 30]  # escalating snooze — each repeat waits longer
+
+
 def log_triage_decision(key: str, decision: str, item_text: str = "", session_id: str = ""):
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -77,10 +82,17 @@ def log_triage_decision(key: str, decision: str, item_text: str = "", session_id
     }
     if decision == "later":
         from datetime import timedelta
-        until = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-        record["later_until"] = until
+        # Smart "Later": the more times you snooze a card, the longer it waits
+        # (3 → 7 → 14 → 30 days) rather than a flat 7. Count prior snoozes for this key.
+        prior = get_triage_decisions().get(key, {})
+        count = int(prior.get("later_count", 0) or 0) + 1
+        days = LATER_SCHEDULE_DAYS[min(count - 1, len(LATER_SCHEDULE_DAYS) - 1)]
+        record["later_count"] = count
+        record["later_days"] = days
+        record["later_until"] = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
     with TRIAGE_LOG.open("a") as f:
         f.write(json.dumps(record) + "\n")
+    return record
 
 
 def item_key(session_id: str, kind: str, text: str) -> str:
@@ -89,55 +101,72 @@ def item_key(session_id: str, kind: str, text: str) -> str:
     return f"{session_id}:{kind}:{h}"
 
 
-def get_triage_candidates(limit=7, max_per_project=2):
-    cards = load_all_cards()
-    decisions = get_triage_decisions()
-    candidates = []
-    for card in cards:
-        for item in card.get("open_items", []) or []:
-            item["_kind"] = "open_item"
-            candidates.append((item, card))
-        for spark in card.get("sparks", []) or []:
-            spark["_kind"] = "spark"
-            candidates.append((spark, card))
+TYPE_WEIGHTS = {
+    "commitment": 1.0, "worry": 0.7, "question": 0.5,
+    "idea": 0.4, "observation": 0.3, "tangent": 0.3, "side-question": 0.5,
+}
 
-    type_weights = {
-        "commitment": 1.0, "worry": 0.7, "question": 0.5,
-        "idea": 0.4, "observation": 0.3, "tangent": 0.3, "side-question": 0.5,
-    }
-    scored = []
-    for item, card in candidates:
-        key = item_key(card["_session_id"], item["_kind"], item.get("text", ""))
-        if key in decisions:
-            d = decisions[key]
+
+def _item_salience(it):
+    """How much a single fragment deserves to represent its conversation."""
+    s = TYPE_WEIGHTS.get(it.get("type", ""), 0.3)
+    if it.get("_kind") == "open_item":   # things to act on rank above loose sparks
+        s += 0.15
+    return s
+
+
+def get_triage_cards(limit=12, offset=0):
+    """One triage entry per CONVERSATION, not per fragment.
+
+    The old design surfaced every open_item and spark as its own decision —
+    547 conversations became 5,600+ things to triage. A daily-review tool can't
+    ask that. Here each card contributes a single representative line (its most
+    salient item), so triage reads as "review this conversation", and the heavy
+    detail stays one click away on the full card.
+
+    Returns (total_undecided, batch) where batch is a list of
+    (score, representative_item, card, card_key, item_count).
+    """
+    cards = load_all_cards()  # already newest-first, so ties break by recency
+    decisions = get_triage_decisions()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    ranked = []
+    for card in cards:
+        card_key = card["_session_id"]  # decisions are per-conversation now
+        d = decisions.get(card_key)
+        if d:
             if d.get("decision") in ("keep", "ignore", "done"):
                 continue
             if d.get("decision") == "later":
                 until = d.get("later_until")
-                if until and datetime.now(timezone.utc).isoformat() < until:
+                if until and now_iso < until:
                     continue
-        score = type_weights.get(item.get("type", ""), 0.3)
+
+        items = []
+        for it in (card.get("open_items") or []):
+            # Completion-aware: finished work stays OUT of triage. Items with no
+            # status yet (not re-judged) default to showing, as before.
+            if (it.get("status") or "open").lower() == "done":
+                continue
+            it["_kind"] = "open_item"; items.append(it)
+        for sp in (card.get("sparks") or []):
+            sp["_kind"] = "spark"; items.append(sp)
+        if not items:
+            continue  # every actionable item is done (and no sparks left) — nothing to review
+
+        rep = max(items, key=_item_salience)
+        score = _item_salience(rep)
         try:
-            conf = float(card.get("project_match", {}).get("confidence", 0))
-            if conf > 0.7:
+            if float(card.get("project_match", {}).get("confidence", 0)) > 0.7:
                 score += 0.2
         except (TypeError, ValueError):
             pass
-        scored.append((score, item, card, key))
-    scored.sort(key=lambda x: -x[0])
+        ranked.append((score, rep, card, card_key, len(items)))
 
-    # Apply per-project cap
-    seen = {}
-    out = []
-    for s, item, card, key in scored:
-        proj = item.get("project") or card.get("project_match", {}).get("id", "none")
-        if seen.get(proj, 0) >= max_per_project:
-            continue
-        out.append((s, item, card, key))
-        seen[proj] = seen.get(proj, 0) + 1
-        if len(out) >= limit:
-            break
-    return out
+    ranked.sort(key=lambda x: -x[0])
+    total = len(ranked)
+    return total, ranked[offset:offset + limit]
 
 
 # === HTML template (Tailwind via CDN, HTMX for interactivity) ===
@@ -149,7 +178,8 @@ BASE = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Phaedrus — {{ page_title }}</title>
-<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 50 50'%3E%3Crect width='50' height='50' rx='11' fill='%23221e18'/%3E%3Ccircle cx='25' cy='26' r='13' fill='none' stroke='%233f7355' stroke-width='3.6'/%3E%3Cline x1='25' y1='5.5' x2='25' y2='46.5' stroke='%233f7355' stroke-width='3.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<script src="/static/htmx.min.js"></script>
 <style>
   :root {
     --bg: #f6f2ea;
@@ -160,10 +190,10 @@ BASE = """
     --ink-3: #a59c88;
     --line: rgba(34,30,24,0.10);
     --line-2: rgba(34,30,24,0.16);
-    --accent: #c2603d;
-    --accent-ink: #9c441f;
-    --accent-soft: #f3e2d6;
-    --ok: #4a7a52; --ok-soft: #e6efe4;
+    --accent: #3f7355;
+    --accent-ink: #2b5740;
+    --accent-soft: #e2ece4;
+    --ok: #2f7d70; --ok-soft: #dfeeea;
     --warn: #a9701f; --warn-soft: #f5ead2;
     --info: #3d6589; --info-soft: #e4ecf3;
     --serif: "Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
@@ -240,6 +270,20 @@ BASE = """
       border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); width: 100%; }
   input[type=search]:focus, input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
+  /* Light filter bar + list rows (UX: narrow, then scan — no wall of cards) */
+  select { font: inherit; font-size: 13px; padding: 8px 11px; border: 1px solid var(--line-2);
+           border-radius: var(--radius-sm); background: var(--surface); color: var(--ink-2); cursor: pointer; }
+  select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .filterbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
+  .filterbar input[type=search] { flex: 1 1 200px; width: auto; }
+  .lrow { display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+          padding: 11px 6px; border-bottom: 1px solid var(--line); transition: background .12s; }
+  .lrow:hover { background: var(--surface); }
+  .lrow .t { font-family: var(--serif); font-size: 15.5px; font-weight: 600; color: var(--ink);
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .m { display: flex; align-items: center; gap: 10px; white-space: nowrap; flex-shrink: 0;
+             color: var(--ink-3); font-size: 12.5px; }
+
   footer { max-width: 940px; margin: 0 auto; padding: 24px; color: var(--ink-3); font-size: 12px; border-top: 1px solid var(--line); }
   .fade-in { animation: fade .2s ease; } @keyframes fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; } }
 </style>
@@ -258,6 +302,7 @@ BASE = """
       <a href="/projects" class="tab {% if active == 'projects' %}on{% endif %}">Projects</a>
       <a href="/import" class="tab {% if active == 'import' %}on{% endif %}">Import</a>
       <a href="/settings" class="tab {% if active == 'settings' %}on{% endif %}">Settings</a>
+      <a href="/guide" class="tab {% if active == 'guide' %}on{% endif %}">Guide</a>
     </div>
   </div>
 </nav>
@@ -326,7 +371,7 @@ def provider_chip(src: str, url: str = "", *, link: bool = True) -> str:
     if not src:
         return ""
     label = SOURCE_LABEL.get(src, src.title())
-    glyph = _PROVIDER_GLYPH.get(src, "")
+    glyph = provider_svg(src) or _PROVIDER_GLYPH.get(src, "")  # real mark, else hand-drawn fallback
     inner = f'<span style="display:inline-flex;align-items:center;gap:5px">{glyph}{label}</span>'
     style = "background:var(--accent-soft);color:var(--accent-ink)"
     if link and url:
@@ -336,66 +381,117 @@ def provider_chip(src: str, url: str = "", *, link: bool = True) -> str:
 
 # === Pages ===
 
+TRIAGE_BATCH = 12  # conversations shown per "page" of triage
+
+
+def _render_triage_card(score, item, card, card_key, item_count):
+    """One conversation as a triage card: its sharpest line as the hero quote,
+    the heavy detail kept one click away on the full card. Keep/Ignore/Later
+    decide the whole conversation."""
+    t = item.get("type", "")
+    pill_class, label, accent = TYPE_BADGES.get(t, ("pill-neutral", t or "note", "var(--ink-3)"))
+    topic = (card.get("topic") or "Untitled").strip()
+    text = (item.get("text") or "").strip()
+    meta = card.get("_meta", {}) or {}
+    src = (meta.get("source") or "").lower()
+    src_chip = provider_chip(src, link=False)
+    date = (meta.get("extracted_at") or "")[:10]
+    date_meta = f'<span class="meta">{date}</span>' if date else ""
+    proj = item.get("project") or card.get("project_match", {}).get("id", "")
+    proj_txt = f" · {proj}" if proj and proj not in ("none", "new") else ""
+    ctx = (card.get("context") or "").strip()
+    ctx_excerpt = (ctx[:170].rsplit(" ", 1)[0] + "…") if len(ctx) > 170 else ctx
+    ctx_html = (f'<div style="margin-top:9px;font-size:13.5px;color:var(--ink-2);line-height:1.45">{ctx_excerpt}</div>'
+                if ctx_excerpt else "")
+    session_id = card["_session_id"]
+    rest = item_count - 1
+    more_txt = (f' · <span style="color:var(--ink-3)">{rest} more point{"s" if rest != 1 else ""} in this conversation</span>'
+                if rest > 0 else "")
+
+    # Completion-aware controls. An "uncertain" actionable item ASKS rather than
+    # assumes — Khalil decides Yes-done / Not-yet. Everything else: Keep/Ignore/Later.
+    status = (item.get("status") or "").lower()
+    uncertain = item.get("_kind") == "open_item" and status == "uncertain"
+
+    def _btn(decision, lbl, cls):
+        return (f'<button class="btn {cls}" hx-post="/triage/decide" '
+                f'hx-vals=\'{{"key": "{card_key}", "decision": "{decision}", "session_id": "{session_id}"}}\'>{lbl}</button>')
+
+    if uncertain:
+        reason = (item.get("status_reason") or "").strip()
+        reason_txt = f" — {reason}" if reason else ""
+        ask_html = (f'<div class="meta" style="margin-top:11px;color:var(--warn)">'
+                    f'❓ Not sure this got done{reason_txt}. Did you finish it?</div>')
+        buttons = _btn("done", "Yes, done", "btn-keep") + _btn("keep", "Not yet", "btn-ghost") + _btn("later", "Later", "btn-soft")
+    else:
+        ask_html = ""
+        buttons = _btn("keep", "Keep", "btn-keep") + _btn("ignore", "Ignore", "btn-ghost") + _btn("later", "Later", "btn-soft")
+
+    return f"""
+    <div class="card card-hover fade-in">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px">
+            <span style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:{accent}">{label}</span>
+            <span style="display:flex;align-items:center;gap:8px">{src_chip}{date_meta}</span>
+        </div>
+        <div class="quote" style="font-size:19px">{text}</div>
+        <div class="meta" style="margin-top:7px">from “{topic}”{proj_txt}{more_txt}</div>
+        {ctx_html}
+        {ask_html}
+        <a href="/cards/{session_id}" class="meta" style="display:inline-block;margin-top:9px;color:var(--accent-ink)">Open full card →</a>
+        <div style="display:flex;gap:8px;margin-top:15px" hx-target="this" hx-swap="outerHTML">
+            {buttons}
+        </div>
+    </div>
+    """
+
+
+def _more_slot(next_offset, total):
+    """The 'show more' control — replaces itself with the next batch + a fresh slot."""
+    remaining = total - next_offset
+    if remaining <= 0:
+        return ""
+    return (f'<div id="more-slot" style="text-align:center;margin-top:22px">'
+            f'<button class="btn btn-ghost" hx-get="/triage/batch?offset={next_offset}" '
+            f'hx-target="#more-slot" hx-swap="outerHTML">'
+            f'Show more · {remaining} conversation{"s" if remaining != 1 else ""} left</button></div>')
+
+
 @app.route("/")
 def page_triage():
-    items = get_triage_candidates(limit=7, max_per_project=2)
+    total, batch = get_triage_cards(limit=TRIAGE_BATCH, offset=0)
     today = datetime.now().strftime("%A, %d %B %Y")
-    cards_html = ""
-    if not items:
-        cards_html = """
+    if not batch:
+        body = """
         <div class="empty">
           <div class="big">Nothing to triage right now.</div>
           <div>You're clear. New conversations surface here after the next extraction.</div>
         </div>
         """
+        sub = today
     else:
-        for score, item, card, key in items:
-            t = item.get("type", "")
-            pill_class, label, accent = TYPE_BADGES.get(t, ("pill-neutral", t or "note", "var(--ink-3)"))
-            topic = (card.get("topic") or "Untitled").strip()
-            text = (item.get("text") or "").strip()
-            meta = card.get("_meta", {}) or {}
-            src = (meta.get("source") or "").lower()
-            src_chip = provider_chip(src, link=False)
-            date = (meta.get("extracted_at") or "")[:10]
-            date_meta = f'<span class="meta">{date}</span>' if date else ""
-            proj = item.get("project") or card.get("project_match", {}).get("id", "")
-            proj_txt = f" · {proj}" if proj and proj not in ("none", "new") else ""
-            ctx = (card.get("context") or "").strip()
-            ctx_excerpt = (ctx[:170].rsplit(" ", 1)[0] + "…") if len(ctx) > 170 else ctx
-            ctx_html = (f'<div style="margin-top:9px;font-size:13.5px;color:var(--ink-2);line-height:1.45">{ctx_excerpt}</div>'
-                        if ctx_excerpt else "")
-            where = (item.get("where_to_use") or card.get("where_to_use") or "").strip()
-            where_html = f'<div class="meta" style="margin-top:10px;color:var(--accent-ink)">↳ {where}</div>' if where else ""
-            session_id = card["_session_id"]
-            safe_text = text.replace('"', "&quot;").replace("'", "&#39;")
-            cards_html += f"""
-            <div class="card card-hover fade-in" style="border-left:3px solid {accent}">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px">
-                    <span class="pill {pill_class}"><span class="pdot"></span>{label}</span>
-                    <span style="display:flex;align-items:center;gap:8px">{src_chip}{date_meta}</span>
-                </div>
-                <div class="quote" style="font-size:19px">{text}</div>
-                <div class="meta" style="margin-top:7px">from “{topic}”{proj_txt}</div>
-                {ctx_html}
-                {where_html}
-                <a href="/cards/{session_id}" class="meta" style="display:inline-block;margin-top:9px;color:var(--accent-ink)">Open full card →</a>
-                <div style="display:flex;gap:8px;margin-top:15px" hx-target="this" hx-swap="outerHTML">
-                    <button class="btn btn-keep" hx-post="/triage/decide" hx-vals='{{"key": "{key}", "decision": "keep", "text": "{safe_text[:200]}", "session_id": "{session_id}"}}'>Keep</button>
-                    <button class="btn btn-ghost" hx-post="/triage/decide" hx-vals='{{"key": "{key}", "decision": "ignore", "text": "{safe_text[:200]}", "session_id": "{session_id}"}}'>Ignore</button>
-                    <button class="btn btn-soft" hx-post="/triage/decide" hx-vals='{{"key": "{key}", "decision": "later", "text": "{safe_text[:200]}", "session_id": "{session_id}"}}'>Later</button>
-                </div>
-            </div>
-            """
-    plural = "s" if len(items) != 1 else ""
+        cards_html = "".join(_render_triage_card(*b) for b in batch)
+        body = f'<div id="triage-list">{cards_html}</div>{_more_slot(TRIAGE_BATCH, total)}'
+        sub = f'{today} · {total} conversation{"s" if total != 1 else ""} to review'
     content = f"""
     <div class="narrow">
       <h1 class="page-h">Today's triage</h1>
-      <p class="page-sub">{today} · {len(items)} item{plural} to decide</p>
-      {cards_html}
+      <p class="page-sub">{sub}</p>
+      {body}
     </div>
     """
     return render_template_string(BASE, page_title="Triage", active="triage", content=content)
+
+
+@app.route("/triage/batch")
+def triage_batch():
+    """Next page of triage cards, appended via HTMX when 'show more' is clicked."""
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    total, batch = get_triage_cards(limit=TRIAGE_BATCH, offset=offset)
+    cards_html = "".join(_render_triage_card(*b) for b in batch)
+    return cards_html + _more_slot(offset + TRIAGE_BATCH, total)
 
 
 @app.route("/triage/decide", methods=["POST"])
@@ -404,11 +500,12 @@ def triage_decide():
     decision = request.form.get("decision", "")
     text = request.form.get("text", "")
     session_id = request.form.get("session_id", "")
-    log_triage_decision(key, decision, text, session_id)
+    rec = log_triage_decision(key, decision, text, session_id)
     styles = {
         "keep":   ("var(--ok)", "var(--ok-soft)", "Kept"),
         "ignore": ("var(--ink-3)", "var(--surface-2)", "Ignored"),
-        "later":  ("var(--warn)", "var(--warn-soft)", "Saved for later"),
+        "done":   ("var(--ok)", "var(--ok-soft)", "Done"),
+        "later":  ("var(--warn)", "var(--warn-soft)", f"Back in {rec.get('later_days', 7)} days"),
     }
     color, bg, label = styles.get(decision, ("var(--ink-2)", "var(--surface-2)", decision.capitalize()))
     return (f'<div class="fade-in" style="display:flex;align-items:center;gap:9px;padding:15px 20px;'
@@ -416,52 +513,209 @@ def triage_decide():
             f'<span>✓</span><span>{label}</span></div>')
 
 
+CARDS_PER_PAGE = 25
+
+
+ITEM_TYPES = ["commitment", "worry", "question", "idea"]
+DATE_WINDOWS = [("7", "Last 7 days"), ("30", "Last 30 days"), ("90", "Last 3 months")]
+
+
 @app.route("/cards")
 def page_cards():
     q = request.args.get("q", "").strip().lower()
-    cards = load_all_cards()
-    if q:
-        cards = [c for c in cards if q in json.dumps(c).lower()]
-    SOURCE_LABEL = {"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini", "grok": "Grok",
-                    "perplexity": "Perplexity", "deepseek": "DeepSeek", "obsidian": "Obsidian",
-                    "apple-notes": "Apple Notes", "codex": "Codex", "claude-code": "Claude Code"}
-    rows = ""
-    for card in cards[:120]:
-        topic = (card.get("topic") or "Untitled")[:90]
-        proj = card.get("project_match", {}).get("id", "")
-        meta = card.get("_meta", {})
-        extracted = (meta.get("extracted_at", "") or "")[:10]
-        src = (meta.get("source") or "").lower()
-        opens = len(card.get("open_items", []) or [])
-        sparks = len(card.get("sparks", []) or [])
-        links = len(card.get("links", []) or [])
-        bits = []
-        if opens: bits.append(f"{opens} open")
-        if sparks: bits.append(f"{sparks} spark" + ("s" if sparks != 1 else ""))
-        if links: bits.append(f"{links} link" + ("s" if links != 1 else ""))
-        stats = " · ".join(bits)
-        proj_chip = f'<span class="chip">{proj}</span>' if proj and proj not in ("none", "new") else ""
-        src_chip = provider_chip(src, link=False)
-        rows += f"""
-        <a href="/cards/{card['_session_id']}" class="card card-hover" style="display:block">
-            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:9px">
-                <span style="font-family:var(--serif);font-size:16.5px;font-weight:600;color:var(--ink)">{topic}</span>
-                <span class="meta" style="white-space:nowrap">{extracted}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                {src_chip}{proj_chip}{f'<span class="meta">{stats}</span>' if stats else ''}
-            </div>
-        </a>
+    f_source = request.args.get("source", "").strip().lower()
+    f_project = request.args.get("project", "").strip()
+    f_status = request.args.get("status", "").strip()      # open | uncertain | done
+    f_type = request.args.get("type", "").strip()          # commitment | worry | question | idea
+    f_date = request.args.get("date", "").strip()          # 7 | 30 | 90
+    group = request.args.get("group", "").strip()          # project | source
+    sort = request.args.get("sort", "recent").strip()
+    try:
+        page = max(1, int(request.args.get("p", 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    all_cards = load_all_cards()
+    now = datetime.now(timezone.utc)
+
+    src_counts, proj_counts = {}, {}
+    for c in all_cards:
+        s = (c.get("_meta", {}).get("source") or "").lower()
+        if s:
+            src_counts[s] = src_counts.get(s, 0) + 1
+        p = c.get("project_match", {}).get("id", "")
+        if p and p not in ("none", "new"):
+            proj_counts[p] = proj_counts.get(p, 0) + 1
+
+    def statuses(c):
+        return [(it.get("status") or "open").lower() for it in (c.get("open_items") or [])]
+
+    def all_types(c):
+        return ([(it.get("type") or "").lower() for it in (c.get("open_items") or [])]
+                + [(sp.get("type") or "").lower() for sp in (c.get("sparks") or [])])
+
+    def age_days(c):
+        ts = c.get("_meta", {}).get("extracted_at") or ""
+        try:
+            return (now - datetime.fromisoformat(ts.replace("Z", "+00:00"))).days
+        except Exception:
+            return None
+
+    def keep(c):
+        if q and q not in json.dumps(c, ensure_ascii=False).lower():
+            return False
+        if f_source and (c.get("_meta", {}).get("source") or "").lower() != f_source:
+            return False
+        if f_project and c.get("project_match", {}).get("id", "") != f_project:
+            return False
+        if f_type and f_type not in all_types(c):
+            return False
+        if f_date:
+            d = age_days(c)
+            if d is None or d > int(f_date):
+                return False
+        if f_status:
+            sts = statuses(c)
+            if f_status == "open" and not any(s in ("open", "uncertain") for s in sts):
+                return False
+            if f_status == "uncertain" and "uncertain" not in sts:
+                return False
+            if f_status == "done" and not (sts and all(s == "done" for s in sts)):
+                return False
+        return True
+
+    cards = [c for c in all_cards if keep(c)]
+
+    def n_items(c):
+        return len(c.get("open_items") or []) + len(c.get("sparks") or [])
+
+    def when(c):
+        return c.get("_meta", {}).get("extracted_at") or ""
+
+    if sort == "oldest":
+        cards.sort(key=when)
+    elif sort == "items":
+        cards.sort(key=n_items, reverse=True)
+    elif sort == "az":
+        cards.sort(key=lambda c: (c.get("topic") or "").lower())
+    else:
+        cards.sort(key=when, reverse=True)
+
+    def opt(val, cur, label):
+        return f'<option value="{val}"{" selected" if val == cur else ""}>{label}</option>'
+
+    src_opts = opt("", f_source, "All sources") + "".join(
+        opt(s, f_source, f"{SOURCE_LABEL.get(s, s.title())} ({n})")
+        for s, n in sorted(src_counts.items(), key=lambda x: -x[1]))
+    proj_opts = opt("", f_project, "All projects") + "".join(
+        opt(p, f_project, f"{p} ({n})") for p, n in sorted(proj_counts.items(), key=lambda x: -x[1]))
+    type_opts = opt("", f_type, "Any type") + "".join(opt(t, f_type, t.capitalize() + "s") for t in ITEM_TYPES)
+    date_opts = opt("", f_date, "Any time") + "".join(opt(v, f_date, l) for v, l in DATE_WINDOWS)
+    status_opts = (opt("", f_status, "Any status") + opt("open", f_status, "Has open")
+                   + opt("uncertain", f_status, "Has unsure") + opt("done", f_status, "All done"))
+    sort_opts = "".join(opt(v, sort, l) for v, l in
+                        [("recent", "Newest"), ("oldest", "Oldest"), ("items", "Most items"), ("az", "A–Z")])
+    group_opts = opt("", group, "No grouping") + opt("project", group, "Group: project") + opt("source", group, "Group: source")
+
+    filterbar = (
+        '<form method="get" class="filterbar">'
+        f'<input type="search" name="q" value="{q}" placeholder="Search…">'
+        f'<select name="source" onchange="this.form.submit()">{src_opts}</select>'
+        f'<select name="project" onchange="this.form.submit()">{proj_opts}</select>'
+        f'<select name="type" onchange="this.form.submit()">{type_opts}</select>'
+        f'<select name="status" onchange="this.form.submit()">{status_opts}</select>'
+        f'<select name="date" onchange="this.form.submit()">{date_opts}</select>'
+        f'<select name="sort" onchange="this.form.submit()">{sort_opts}</select>'
+        f'<select name="group" onchange="this.form.submit()">{group_opts}</select>'
+        '<noscript><button class="btn btn-keep">Apply</button></noscript>'
+        '</form>'
+    )
+
+    def row(c):
+        topic = (c.get("topic") or "Untitled")[:100]
+        src = (c.get("_meta", {}).get("source") or "").lower()
+        sts = statuses(c)
+        n_open = sum(1 for s in sts if s in ("open", "uncertain"))
+        if "uncertain" in sts:
+            badge = '<span style="color:var(--warn)">unsure</span>'
+        elif n_open:
+            badge = f'<span style="color:var(--accent-ink)">{n_open} open</span>'
+        elif sts:
+            badge = '<span style="color:var(--ink-3)">done</span>'
+        else:
+            badge = ''
+        proj = c.get("project_match", {}).get("id", "")
+        proj_txt = f'<span>{proj}</span>' if proj and proj not in ("none", "new") and not group else ""
+        return (f'<a href="/cards/{c["_session_id"]}" class="lrow">'
+                f'<span class="t">{topic}</span>'
+                f'<span class="m">{badge}{proj_txt}{provider_chip(src, link=False)}</span></a>')
+
+    total = len(cards)
+
+    # GROUPED view: collapse the whole list into a handful of expandable sections,
+    # so 547 rows become ~12 project headers you open on demand — no endless scroll.
+    if group in ("project", "source"):
+        def bucket(c):
+            if group == "source":
+                return (c.get("_meta", {}).get("source") or "").lower() or "unknown"
+            p = c.get("project_match", {}).get("id", "")
+            return p if p and p not in ("none", "new") else "unsorted"
+        buckets = {}
+        for c in cards:
+            buckets.setdefault(bucket(c), []).append(c)
+
+        sections = ""
+        CAP = 40
+        for key, items in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+            label = SOURCE_LABEL.get(key, key.title()) if group == "source" else key
+            inner = "".join(row(c) for c in items[:CAP])
+            if len(items) > CAP and key not in ("unsorted", "unknown"):
+                drill = f"?{group}={key}"
+                inner += (f'<a href="{drill}" class="meta" style="display:block;padding:11px 6px;color:var(--accent-ink)">'
+                          f'+ {len(items) - CAP} more in {label} — open all →</a>')
+            sections += (
+                f'<details style="border-bottom:1px solid var(--line)">'
+                f'<summary style="cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;'
+                f'gap:12px;padding:13px 6px;font-family:var(--serif);font-size:16px;font-weight:600">'
+                f'<span><span style="color:var(--accent-ink);font-family:var(--sans);font-size:12px">▸ </span>{label}</span>'
+                f'<span class="meta">{len(items)}</span></summary>'
+                f'<div style="padding-bottom:8px">{inner}</div></details>'
+            )
+        body = sections or '<div class="empty"><div class="big">Nothing matches.</div></div>'
+        showing = f"{total} in {len(buckets)} {'sources' if group == 'source' else 'projects'}"
+        content = f"""
+        <h1 class="page-h">Cards</h1>
+        <p class="page-sub">{showing} · click a {group} to expand</p>
+        {filterbar}
+        <div>{body}</div>
         """
-    empty = '<div class="empty"><div class="big">No cards yet.</div><div>Chat on any AI platform, then run an extraction.</div></div>'
+        return render_template_string(BASE, page_title="Cards", active="cards", content=content)
+
+    # FLAT view: paginated light rows.
+    pages = max(1, (total + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE)
+    page = min(page, pages)
+    window = cards[(page - 1) * CARDS_PER_PAGE: page * CARDS_PER_PAGE]
+    rows = "".join(row(c) for c in window) or (
+        '<div class="empty"><div class="big">Nothing matches.</div>'
+        '<div>Clear a filter and try again.</div></div>')
+
+    pager = ""
+    if pages > 1:
+        base = f"?q={q}&source={f_source}&project={f_project}&type={f_type}&status={f_status}&date={f_date}&sort={sort}"
+        prev = (f'<a class="btn btn-ghost" href="{base}&p={page-1}">‹ Prev</a>' if page > 1
+                else '<span class="btn btn-ghost" style="opacity:.35">‹ Prev</span>')
+        nxt = (f'<a class="btn btn-ghost" href="{base}&p={page+1}">Next ›</a>' if page < pages
+               else '<span class="btn btn-ghost" style="opacity:.35">Next ›</span>')
+        pager = (f'<div style="display:flex;align-items:center;justify-content:space-between;margin-top:20px">'
+                 f'{prev}<span class="meta">Page {page} of {pages}</span>{nxt}</div>')
+
+    showing = f"{(page-1)*CARDS_PER_PAGE+1}–{min(page*CARDS_PER_PAGE, total)} of {total}" if total else "0"
     content = f"""
     <h1 class="page-h">Cards</h1>
-    <p class="page-sub">{len(cards)} extracted from your conversations &amp; notes</p>
-    <form method="get" style="display:flex;gap:8px;margin-bottom:22px">
-        <input type="search" name="q" value="{q}" placeholder="Search topics, sparks, links, people…">
-        <button class="btn btn-keep" style="white-space:nowrap">Search</button>
-    </form>
-    <div style="display:grid;gap:12px">{rows or empty}</div>
+    <p class="page-sub">{showing} · {len(all_cards)} conversations in all</p>
+    {filterbar}
+    <div>{rows}</div>
+    {pager}
     """
     return render_template_string(BASE, page_title="Cards", active="cards", content=content)
 
@@ -479,36 +733,70 @@ def page_card_detail(session_id):
 
     LABEL = "font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--ink-3)"
 
-    def _items_html(items, key_field=None):
-        html = '<div style="display:grid;gap:9px">'
-        for it in items:
-            if isinstance(it, dict):
-                primary = it.get(key_field) if key_field else (it.get("text") or it.get("url") or it.get("name") or it.get("path") or "")
-                ctx = it.get("context") or it.get("trigger_context") or it.get("role_or_context") or ""
-                tag = it.get("type") or ""
-                pj = it.get("project") or ""
-                if key_field == "url" and it.get("url"):
-                    primary_html = f'<a href="{primary}" target="_blank" rel="noopener" style="color:var(--accent-ink);text-decoration:underline;word-break:break-all">{primary}</a>'
-                else:
-                    primary_html = primary
-                html += f'<div style="background:var(--surface-2);border-radius:9px;padding:11px 13px"><div style="font-size:14.5px">{primary_html}</div>'
-                if ctx: html += f'<div class="meta" style="margin-top:3px">{ctx}</div>'
-                if tag or pj: html += f'<div class="meta" style="margin-top:3px">{tag}{" · " + pj if pj else ""}</div>'
-                html += '</div>'
-            else:
-                html += f'<div style="background:var(--surface-2);border-radius:9px;padding:11px 13px;font-size:14.5px">{it}</div>'
-        html += '</div>'
-        return html
+    def _primary(it, key_field=None):
+        if not isinstance(it, dict):
+            return str(it)
+        if key_field:
+            return it.get(key_field) or ""
+        return it.get("text") or it.get("url") or it.get("name") or it.get("path") or ""
 
-    # Essence sections: always open (the stuff you actually act on).
+    def _clean(items, key_field=None):
+        """Drop empties and exact-duplicate items within one card. Extraction
+        often repeats the same spark/commitment several times; this collapses
+        them so an opened card isn't padded with noise. Order preserved."""
+        out, seen = [], set()
+        for it in items or []:
+            p = (_primary(it, key_field) or "").strip()
+            if not p:
+                continue
+            norm = " ".join(p.lower().split())
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(it)
+        return out
+
+    def _one_item_html(it, key_field=None):
+        if isinstance(it, dict):
+            primary = _primary(it, key_field)
+            ctx = it.get("context") or it.get("trigger_context") or it.get("role_or_context") or ""
+            tag = it.get("type") or ""
+            pj = it.get("project") or ""
+            if key_field == "url" and it.get("url"):
+                primary_html = f'<a href="{primary}" target="_blank" rel="noopener" style="color:var(--accent-ink);text-decoration:underline;word-break:break-all">{primary}</a>'
+            else:
+                primary_html = primary
+            h = f'<div style="background:var(--surface-2);border-radius:9px;padding:11px 13px"><div style="font-size:14.5px">{primary_html}</div>'
+            if ctx: h += f'<div class="meta" style="margin-top:3px">{ctx}</div>'
+            if tag or pj: h += f'<div class="meta" style="margin-top:3px">{tag}{" · " + pj if pj else ""}</div>'
+            return h + '</div>'
+        return f'<div style="background:var(--surface-2);border-radius:9px;padding:11px 13px;font-size:14.5px">{it}</div>'
+
+    def _items_html(items, key_field=None):
+        return ('<div style="display:grid;gap:9px">'
+                + "".join(_one_item_html(it, key_field) for it in items)
+                + '</div>')
+
+    # Essence sections: the stuff you act on, shown open — but a conversation
+    # with 60 sparks would still bury you, so show the top few and fold the rest.
+    SECTION_CAP = 6
+
     def section(title, items, key_field=None):
+        items = _clean(items, key_field)
         if not items:
             return ""
-        return f'<h3 style="{LABEL};margin:26px 0 10px">{title}</h3>{_items_html(items, key_field)}'
+        head = f'<h3 style="{LABEL};margin:26px 0 10px">{title}</h3>'
+        if len(items) <= SECTION_CAP:
+            return head + _items_html(items, key_field)
+        shown, rest = items[:SECTION_CAP], items[SECTION_CAP:]
+        more = (f'<details style="margin-top:9px"><summary style="cursor:pointer;{LABEL};list-style:none;color:var(--accent-ink)">'
+                f'▸ Show {len(rest)} more</summary><div style="margin-top:9px">{_items_html(rest, key_field)}</div></details>')
+        return head + _items_html(shown, key_field) + more
 
     # Reference sections: collapsed by default — just a count, expand on demand.
     # This is the anti-overwhelm fix: a 78-link card opens calm, depth is one click.
     def fold(title, items, key_field=None):
+        items = _clean(items, key_field)
         if not items:
             return ""
         n = len(items)
@@ -532,9 +820,10 @@ def page_card_detail(session_id):
     # Prominent deep-link to the original conversation (not a tiny chip).
     open_convo = ""
     if url:
+        glyph = provider_svg(src) or _PROVIDER_GLYPH.get(src, "")
         open_convo = (f'<a href="{url}" target="_blank" rel="noopener" class="btn btn-keep" '
                       f'style="display:inline-flex;align-items:center;gap:7px;text-decoration:none;margin-bottom:18px">'
-                      f'{_PROVIDER_GLYPH.get(src, "")} Open the original conversation →</a>')
+                      f'{glyph} Open the original conversation →</a>')
 
     src_chip = provider_chip(src, url, link=False)  # chip in the meta row stays non-link (button does the linking)
 
@@ -566,6 +855,8 @@ def page_card_detail(session_id):
 @app.route("/projects")
 def page_projects():
     config = load_config()
+    f_status = request.args.get("status", "").strip()   # ""=active+on-hold, else a single status
+    sort = request.args.get("sort", "cards").strip()
 
     card_counts = {}
     for c in load_all_cards():
@@ -578,70 +869,71 @@ def page_projects():
         for ch in (info.get("children") or []):
             child_slugs.add(ch)
 
-    top = {"active": [], "on-hold": []}
-    hidden_archived = hidden_dormant = 0
-    for slug, info in config.items():
-        status = info.get("status", "dormant")
-        if status == "archived":
-            hidden_archived += 1; continue
-        if status == "dormant":
-            hidden_dormant += 1; continue
-        if slug in child_slugs:
-            continue
-        top.setdefault(status, []).append((slug, info))
+    scount = {}
+    for _slug, info in config.items():
+        st = info.get("status", "dormant")
+        scount[st] = scount.get(st, 0) + 1
 
-    def status_pill(status, small=False):
-        label, color, bg = STATUS_META.get(status, ("?", "var(--ink-3)", "var(--surface-2)"))
-        size = "font-size:10.5px;padding:2px 8px" if small else ""
-        return f'<span class="pill" style="background:{bg};color:{color};{size}">{label}</span>'
+    wanted = {f_status} if f_status else {"active", "on-hold"}
 
-    def render_project(slug, info):
-        desc = info.get("description") or ""
-        children = info.get("children") or []
-        n = card_counts.get(slug, 0) + sum(card_counts.get(ch, 0) for ch in children)
-        count_chip = f'<span class="meta">{n} card{"s" if n != 1 else ""}</span>' if n else ""
-        kids_html = ""
-        if children:
-            kid_rows = ""
-            for ch in sorted(children):
-                cinfo = config.get(ch, {})
-                cn = card_counts.get(ch, 0)
-                cn_html = f'<span class="meta">{cn}</span>' if cn else ""
-                kid_rows += (
-                    '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;'
-                    'padding:8px 0;border-top:1px solid var(--line)">'
-                    f'<span style="font-size:13.5px;color:var(--ink-2)">{ch}</span>'
-                    f'<span style="display:flex;align-items:center;gap:9px">{cn_html}{status_pill(cinfo.get("status", "dormant"), small=True)}</span></div>'
-                )
-            kids_html = f'<div style="margin-top:13px">{kid_rows}</div>'
-        desc_html = f'<p style="margin:7px 0 0;color:var(--ink-2);font-size:14px">{desc}</p>' if desc else ""
-        sub_note = ""
-        if children and not desc:
-            sub_note = f'<p style="margin:7px 0 0;color:var(--ink-3);font-size:13px">{len(children)} sub-project{"s" if len(children) != 1 else ""}</p>'
-        return f"""
-        <div class="card card-hover">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-            <span style="font-family:var(--serif);font-size:17px;font-weight:600">{slug}</span>
-            <span style="display:flex;align-items:center;gap:10px">{count_chip}{status_pill(info.get('status', 'dormant'))}</span>
-          </div>
-          {desc_html}{sub_note}{kids_html}
-        </div>"""
+    def total_cards(slug, info):
+        return card_counts.get(slug, 0) + sum(card_counts.get(ch, 0) for ch in (info.get("children") or []))
 
-    def render_section(name, items):
-        if not items:
-            return ""
-        cards = "".join(render_project(s, i) for s, i in sorted(items))
-        return (f'<h2 style="font-family:var(--serif);font-size:18px;font-weight:600;margin:30px 0 12px">{name} '
-                f'<span class="meta" style="font-family:var(--sans);font-weight:400">({len(items)})</span></h2>'
-                f'<div style="display:grid;gap:12px">{cards}</div>')
+    rows_data = [(s, i) for s, i in config.items()
+                 if s not in child_slugs and i.get("status", "dormant") in wanted]
+    if sort == "az":
+        rows_data.sort(key=lambda x: x[0].lower())
+    else:
+        rows_data.sort(key=lambda x: -total_cards(*x))
 
-    shown = len(top["active"]) + len(top["on-hold"])
+    def status_tag(status):
+        label, color, _bg = STATUS_META.get(status, ("?", "var(--ink-3)", ""))
+        return (f'<span style="font-size:10.5px;font-weight:600;letter-spacing:.06em;'
+                f'text-transform:uppercase;color:{color}">{label}</span>')
+
+    def row(slug, info):
+        n = total_cards(slug, info)
+        kids = info.get("children") or []
+        count = f'<span class="meta">{n} card{"s" if n != 1 else ""}</span>' if n else ""
+        sub = f'<span class="meta">{len(kids)} sub</span>' if kids else ""
+        head = (f'<div class="lrow"><span class="t">{slug}</span>'
+                f'<span class="m">{sub}{count}{status_tag(info.get("status", "dormant"))}</span></div>')
+        if kids:
+            kid_rows = "".join(
+                f'<div class="lrow" style="padding-left:22px">'
+                f'<span class="t" style="font-family:var(--sans);font-size:13.5px;font-weight:500;color:var(--ink-2)">{ch}</span>'
+                f'<span class="m">{(str(card_counts.get(ch, 0)) if card_counts.get(ch, 0) else "")} '
+                f'{status_tag(config.get(ch, {}).get("status", "dormant"))}</span></div>'
+                for ch in sorted(kids))
+            head += (f'<details><summary style="cursor:pointer;list-style:none;font-size:12px;'
+                     f'color:var(--accent-ink);padding:6px 0 6px 22px">▸ {len(kids)} sub-projects</summary>{kid_rows}</details>')
+        return head
+
+    def opt(val, cur, label):
+        return f'<option value="{val}"{" selected" if val == cur else ""}>{label}</option>'
+
+    status_opts = (opt("", f_status, "Active + on-hold")
+                   + opt("active", f_status, f"Active ({scount.get('active', 0)})")
+                   + opt("on-hold", f_status, f"On hold ({scount.get('on-hold', 0)})")
+                   + opt("dormant", f_status, f"Dormant ({scount.get('dormant', 0)})")
+                   + opt("archived", f_status, f"Archived ({scount.get('archived', 0)})"))
+    sort_opts = opt("cards", sort, "Most cards") + opt("az", sort, "A–Z")
+    filterbar = (
+        '<form method="get" class="filterbar">'
+        f'<select name="status" onchange="this.form.submit()">{status_opts}</select>'
+        f'<select name="sort" onchange="this.form.submit()">{sort_opts}</select>'
+        '</form>'
+    )
+
+    body = "".join(row(s, i) for s, i in rows_data) or (
+        '<div class="empty"><div class="big">No projects in this view.</div>'
+        '<div>Switch the status filter above.</div></div>')
     content = f"""
     <h1 class="page-h">Projects</h1>
-    <p class="page-sub">{shown} active &amp; on-hold · {hidden_archived} archived and {hidden_dormant} dormant hidden</p>
-    {render_section("Active", top["active"])}
-    {render_section("On hold", top["on-hold"])}
-    <p class="meta" style="margin-top:32px">Grouping and visibility live in <code>~/.phaedrus/projects.yml</code> — edit it freely.</p>
+    <p class="page-sub">{len(rows_data)} shown · {len(config)} total</p>
+    {filterbar}
+    <div>{body}</div>
+    <p class="meta" style="margin-top:28px">Grouping &amp; visibility live in <code>~/.phaedrus/projects.yml</code>.</p>
     """
     return render_template_string(BASE, page_title="Projects", active="projects", content=content)
 
@@ -702,6 +994,66 @@ def page_settings():
     </section>
     """
     return render_template_string(BASE, page_title="Settings", active="settings", content=content)
+
+
+@app.route("/guide")
+def page_guide():
+    SH = "font-family:var(--serif);font-size:20px;font-weight:600;margin:30px 0 8px"
+    step = ("display:flex;gap:13px;align-items:flex-start;padding:14px 0;border-bottom:1px solid var(--line)")
+    num = ("flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--accent-soft);"
+           "color:var(--accent-ink);font-weight:600;font-size:13px;display:flex;align-items:center;justify-content:center")
+
+    def tab_row(name, what):
+        return (f'<div style="display:flex;gap:13px;padding:11px 0;border-bottom:1px solid var(--line)">'
+                f'<span style="flex-shrink:0;width:84px;font-weight:600;color:var(--ink)">{name}</span>'
+                f'<span style="color:var(--ink-2);font-size:14px">{what}</span></div>')
+
+    content = f"""
+    <div class="narrow">
+      <h1 class="page-h">How Phaedrus works</h1>
+      <p class="page-sub">A two-minute daily habit so nothing important from your AI chats slips through.</p>
+
+      <div class="card" style="background:var(--accent-soft);border:none">
+        <div style="font-family:var(--serif);font-size:17px;font-weight:600;margin-bottom:5px">The idea</div>
+        <div style="color:var(--ink-2);line-height:1.6">You talk to Claude, ChatGPT, Grok and the rest all day. Decisions, promises, worries
+        and ideas get buried in those chats and forgotten. Phaedrus reads them, pulls out the things that matter,
+        and shows you a short daily list to act on. You stop re-reading old conversations to remember what you said you'd do.</div>
+      </div>
+
+      <h2 style="{SH}">Your daily ritual</h2>
+      <div style="{step}"><span style="{num}">1</span><div><b>Open Triage</b> once a day. It shows only conversations with something still unfinished.</div></div>
+      <div style="{step}"><span style="{num}">2</span><div>For each card, read the one line it pulled out, then decide:
+        <b>Keep</b> (it matters — file it), <b>Ignore</b> (not important), <b>Later</b> (remind me in a week).</div></div>
+      <div style="{step}"><span style="{num}">3</span><div>When it isn't sure whether you already finished something, it <b>asks</b>
+        — “Did you finish this?” — instead of guessing. You answer <b>Yes, done</b> or <b>Not yet</b>.</div></div>
+      <div style="{step}"><span style="{num}">4</span><div>That's it. Close it. Anything you didn't reach is waiting tomorrow.</div></div>
+
+      <h2 style="{SH}">What it pulls out</h2>
+      <p style="color:var(--ink-2);line-height:1.6;margin:0 0 6px">From each conversation it makes one <b>card</b> with the commitments,
+      worries, open questions and ideas. Each action gets a status:</p>
+      <div style="display:flex;flex-direction:column;gap:7px;margin-top:10px">
+        <div><span style="color:var(--accent-ink);font-weight:600">open</span> <span class="meta">— still to do, shows in triage</span></div>
+        <div><span style="color:var(--warn);font-weight:600">unsure</span> <span class="meta">— it can't tell if you finished, so it asks you</span></div>
+        <div><span style="color:var(--ink-3);font-weight:600">done</span> <span class="meta">— finished in the chat, hidden so it stops nagging</span></div>
+      </div>
+      <p class="meta" style="margin-top:10px">It never marks something “done” on a guess — if it isn't certain, it asks. That's deliberate.</p>
+
+      <h2 style="{SH}">The tabs</h2>
+      {tab_row("Triage", "Your daily list. The only place you need most days.")}
+      {tab_row("Cards", "The full archive. Search, or narrow with the filters (source, project, type, status, date) and group by project so you never scroll forever.")}
+      {tab_row("Projects", "Everything grouped by project, with counts.")}
+      {tab_row("Import", "Pull your back-history in from each platform — automatic where possible, export-file where not.")}
+      {tab_row("Settings", "Tune what gets extracted and how it learns from your Keep/Ignore choices.")}
+
+      <h2 style="{SH}">When the list feels long</h2>
+      <p style="color:var(--ink-2);line-height:1.6;margin:0">Go to <b>Cards</b>, set <b>Group: project</b> — the whole archive collapses to a
+      handful of headings you expand one at a time. Or filter by <b>Last 7 days</b>, a single <b>source</b>, or a <b>type</b>
+      like commitments. The goal is to never face a wall.</p>
+
+      <p class="meta" style="margin-top:30px">Everything runs on your machine. Your conversations never leave it.</p>
+    </div>
+    """
+    return render_template_string(BASE, page_title="Guide", active="guide", content=content)
 
 
 # === Extension capture endpoint ===
@@ -831,7 +1183,7 @@ def page_import():
             auto_cell = (
                 f'<div style="flex:1;min-width:200px">'
                 f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
-                f'<span class="pill pill-idea"><span class="pdot"></span>Automatic</span>'
+                f'<span style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--ok)">Automatic</span>'
                 f'<span class="chip" style="background:var(--ok-soft);color:var(--ok)">{p["auto"]["eta"]}</span></div>'
                 f'<div class="meta">{p["auto"]["note"]}</div></div>'
             )
@@ -839,7 +1191,7 @@ def page_import():
             auto_cell = (
                 f'<div style="flex:1;min-width:200px">'
                 f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
-                f'<span class="pill pill-neutral"><span class="pdot"></span>Automatic</span>'
+                f'<span style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-3)">Automatic</span>'
                 f'<span class="chip">not available</span></div>'
                 f'<div class="meta">No background pull — use the export steps.</div></div>'
             )
@@ -854,7 +1206,7 @@ def page_import():
         manual_cell = (
             f'<div style="flex:1;min-width:200px">'
             f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
-            f'<span class="pill pill-question"><span class="pdot"></span>Export file</span>'
+            f'<span style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--info)">Export file</span>'
             f'<span class="chip" style="background:var(--info-soft);color:var(--info)">{m["eta"]}</span></div>'
             f'<details style="margin-top:2px"><summary style="cursor:pointer;font-size:13px;color:var(--accent-ink)">Show steps</summary>'
             f'<ol style="margin:8px 0 0;padding-left:18px">{steps_li}</ol>{open_btn}</details></div>'
@@ -908,20 +1260,20 @@ def do_import():
 
     f = request.files.get("file")
     if not f:
-        return '<div class="card" style="border-left:3px solid var(--warn)">No file received. Pick an export file and try again.</div>'
+        return '<div class="card" style="background:var(--warn-soft)">No file received. Pick an export file and try again.</div>'
     raw = f.read()
     if not raw:
-        return '<div class="card" style="border-left:3px solid var(--warn)">That file was empty.</div>'
+        return '<div class="card" style="background:var(--warn-soft)">That file was empty.</div>'
 
     try:
         result = import_exports.import_bytes(raw, filename=f.filename or "")
     except Exception as e:
-        return f'<div class="card" style="border-left:3px solid var(--warn)">Could not parse that file: {e}</div>'
+        return f'<div class="card" style="background:var(--warn-soft)">Could not parse that file: {e}</div>'
 
     records = result.get("records", [])
     if not records:
         errs = "; ".join(result.get("errors", [])) or "no conversations recognised in that file"
-        return (f'<div class="card" style="border-left:3px solid var(--warn)">'
+        return (f'<div class="card" style="background:var(--warn-soft)">'
                 f'<div style="font-weight:600">Nothing imported</div>'
                 f'<div class="meta" style="margin-top:4px">{errs}. '
                 f'Make sure it’s the conversations export (not the account-info file).</div></div>')
@@ -958,7 +1310,7 @@ def do_import():
 
     by_platform = result.get("by_platform", {})
     bp = " · ".join(f"{k}: {v}" for k, v in by_platform.items())
-    return (f'<div class="card fade-in" style="border-left:3px solid var(--ok)">'
+    return (f'<div class="card fade-in" style="background:var(--ok-soft)">'
             f'<div style="font-weight:600;font-size:15px">Imported {written} conversation{"s" if written != 1 else ""}</div>'
             f'<div class="meta" style="margin-top:5px">{bp}</div>'
             f'<div class="meta" style="margin-top:8px">Saved locally to <code>~/.phaedrus/web_captures/</code>. '
@@ -973,6 +1325,8 @@ def open_browser():
 
 if __name__ == "__main__":
     print("Phaedrus dashboard starting at http://localhost:5050")
-    print("Press Ctrl+C to stop.")
-    Timer(1.5, open_browser).start()
+    # Auto-open the browser only on a manual launch. The login service sets
+    # PHAEDRUS_NO_BROWSER=1 so it runs headless (no tab popping up every login).
+    if not os.environ.get("PHAEDRUS_NO_BROWSER"):
+        Timer(1.5, open_browser).start()
     app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False)
