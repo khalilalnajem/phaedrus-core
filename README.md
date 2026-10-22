@@ -21,6 +21,16 @@ Early and rough.
 
 Treat anything here as subject to change.
 
+## Choosing an extraction backend
+
+Phaedrus needs a language model to pull cards out of your conversations. It picks one automatically:
+
+- `ANTHROPIC_API_KEY` set: uses Anthropic.
+- `OPENAI_API_KEY` set: uses OpenAI.
+- Neither: uses the [Codex CLI](https://github.com/openai/codex), which needs no API key. It is free but slow, roughly 5 to 6 minutes per session.
+
+Force one with `PHAEDRUS_LLM_MODE=codex_cli|anthropic|openai`. Copy `.env.example` to `.env` to set it.
+
 ## What lives where
 
 - `scripts/phaedrus/` is the Phaedrus app itself: the local dashboard, extraction, triage, and completion judging.
